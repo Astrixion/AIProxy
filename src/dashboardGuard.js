@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { getSettings, validateApiKey } from "@/lib/localDb";
+import { getSettings, resolveAccessToken, validateApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
 import { hasTrustedPeerHeaders } from "@/lib/auth/trustedPeer";
+import { internalApiStatus } from "@/lib/auth/internalApi";
 
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
 const CLI_TOKEN_SALT = "9r-cli-auth";
@@ -151,10 +152,23 @@ function extractApiKey(request) {
 async function hasValidApiKey(request) {
   const apiKey = extractApiKey(request);
   if (!apiKey) return false;
-  return await validateApiKey(apiKey);
+  if (await validateApiKey(apiKey)) return true;
+
+  const accessToken = await resolveAccessToken(apiKey);
+  if (!accessToken) return false;
+  const path = request.nextUrl.pathname;
+  return path === "/v1/messages"
+    || path === "/api/v1/messages"
+    || path === "/v1/models"
+    || path === "/api/v1/models";
 }
 
 async function canAccessPublicLlmApi(request) {
+  // Scoped credentials never inherit localhost/CLI bypasses and are valid only
+  // on the Anthropic Messages and filtered model-list endpoints.
+  if (extractApiKey(request)?.startsWith("aip_sk_")) {
+    return await hasValidApiKey(request);
+  }
   if (isLocalRequest(request)) return true;
   if (await hasValidCliToken(request)) return true;
   return await hasValidApiKey(request);
@@ -212,6 +226,12 @@ export async function proxy(request) {
     if (!(await canAccessLocalOnlyRoute(request))) {
       return NextResponse.json({ error: "Local only: CLI token required" }, { status: 403 });
     }
+  }
+
+  if (pathname === "/api/internal" || pathname.startsWith("/api/internal/")) {
+    const auth = internalApiStatus(request);
+    if (auth.ok) return NextResponse.next();
+    return NextResponse.json({ error: auth.error }, { status: auth.status });
   }
 
   // Always protected - require valid JWT or local CLI token (machineId-based)

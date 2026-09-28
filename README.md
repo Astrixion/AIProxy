@@ -23,6 +23,25 @@
 
 ---
 
+## AIProxy fork
+
+This fork keeps 9Router's provider OAuth, account pooling, protocol translation, quota handling,
+and dashboard. It adds the control-plane boundary needed by Misanthropic:
+
+- provider keys are named pools of exact `{ connectionId, model }` members;
+- `round-robin`, `fill-first`, `random`, and `least-used` routing;
+- hash-only access tokens scoped to literal provider-key names;
+- idempotent session credentials for `primary` and `browser-vision` slots;
+- session revocation and orphan reconciliation;
+- the reserved `all` key, which round-robins over every configured provider-key member;
+- metadata-only request history.
+
+Set `AIPROXY_CONTROL_TOKEN` and `AIPROXY_SESSION_TOKEN_SECRET` before using
+`/api/internal/*`. Scoped credentials can call only `/v1/messages` and `/v1/models`.
+The original 9Router global API keys remain available for dashboard and upstream compatibility.
+
+---
+
 ## 🤔 Why 9Router?
 
 **Stop wasting money, tokens and hitting limits:**
@@ -1319,6 +1338,8 @@ docker pull decolua/9router:latest   # update to latest
 | `NEXT_PUBLIC_BASE_URL`                               | `http://localhost:3000`                  | Backward-compatible/public base URL (prefer `BASE_URL` for server runtime)          |
 | `NEXT_PUBLIC_CLOUD_URL`                              | `https://9router.com`                    | Backward-compatible/public cloud URL (prefer `CLOUD_URL` for server runtime)        |
 | `API_KEY_SECRET`                                     | `endpoint-proxy-api-key-secret`          | HMAC secret for generated API keys                                                  |
+| `AIPROXY_CONTROL_TOKEN`                              | none                                     | Bearer token for `/api/internal/*`                                                   |
+| `AIPROXY_SESSION_TOKEN_SECRET`                       | none                                     | HMAC secret for deterministic session credentials (minimum 32 characters)           |
 | `MACHINE_ID_SALT`                                    | `endpoint-proxy-salt`                    | Salt for stable machine ID hashing                                                  |
 | `ENABLE_REQUEST_LOGS`                                | `false`                                  | Enables request/response logs under `logs/`                                         |
 | `AUTH_COOKIE_SECURE`                                 | `false`                                  | Force `Secure` auth cookie (set `true` behind HTTPS reverse proxy)                  |

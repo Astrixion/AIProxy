@@ -1,0 +1,201 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+const originalDataDir = process.env.DATA_DIR;
+const originalSessionSecret = process.env.AIPROXY_SESSION_TOKEN_SECRET;
+let tempDir;
+let db;
+let adapter;
+
+beforeAll(async () => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "aiproxy-access-"));
+  process.env.DATA_DIR = tempDir;
+  process.env.AIPROXY_SESSION_TOKEN_SECRET = "test-session-secret-that-is-at-least-32-characters";
+  vi.resetModules();
+  db = await import("@/lib/db/index.js");
+  ({ getAdapter: adapter } = await import("@/lib/db/driver.js"));
+  await db.initDb();
+  adapter = await adapter();
+
+  await db.createCombo({ name: "primary-key", kind: "llm", models: ["claude/test"] });
+  await db.createCombo({ name: "vision-key", kind: "llm", models: ["claude/vision"] });
+});
+
+afterAll(() => {
+  if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  if (originalDataDir === undefined) delete process.env.DATA_DIR;
+  else process.env.DATA_DIR = originalDataDir;
+  if (originalSessionSecret === undefined) delete process.env.AIPROXY_SESSION_TOKEN_SECRET;
+  else process.env.AIPROXY_SESSION_TOKEN_SECRET = originalSessionSecret;
+});
+
+describe("AIProxy scoped credentials", () => {
+  it("treats allowed keys literally and never as wildcards", async () => {
+    const { validateAllowedKeys } = await import("@/lib/aiproxy/accessControl.js");
+
+    await expect(validateAllowedKeys(["primary-key", "all"]))
+      .resolves.toEqual(["primary-key", "all"]);
+    await expect(validateAllowedKeys(["*"]))
+      .rejects.toThrow("Unknown provider key '*'");
+  });
+
+  it("stores only the hash of a manual token", async () => {
+    const issued = await db.createManualAccessToken("operator", ["primary-key"]);
+    const row = adapter.get(`SELECT * FROM accessTokens WHERE id = ?`, [issued.record.id]);
+
+    expect(issued.token).toMatch(/^aip_sk_/);
+    expect(JSON.stringify(row)).not.toContain(issued.token);
+    expect(row.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(await db.resolveAccessToken(issued.token)).toMatchObject({
+      id: issued.record.id,
+      allowedKeys: ["primary-key"],
+    });
+  });
+
+  it("reissues the same session credential for the same session and slot", async () => {
+    const first = await db.upsertSessionAccessToken({
+      externalSessionId: "session-1",
+      slot: "primary",
+      name: "coordinator",
+      allowedKeys: ["primary-key"],
+    });
+    const retry = await db.upsertSessionAccessToken({
+      externalSessionId: "session-1",
+      slot: "primary",
+      name: "coordinator retry",
+      allowedKeys: ["primary-key", "vision-key"],
+    });
+
+    expect(retry.token).toBe(first.token);
+    expect(retry.record.id).toBe(first.record.id);
+    expect(retry.record.allowedKeys).toEqual(["primary-key", "vision-key"]);
+    expect(adapter.get(
+      `SELECT COUNT(*) AS count FROM accessTokens WHERE externalSessionId = ? AND slot = ?`,
+      ["session-1", "primary"]
+    ).count).toBe(1);
+  });
+
+  it("revokes every credential for a permanently deleted session", async () => {
+    const vision = await db.upsertSessionAccessToken({
+      externalSessionId: "session-1",
+      slot: "browser-vision",
+      name: "browser",
+      allowedKeys: ["vision-key"],
+    });
+
+    expect(await db.revokeSessionAccessTokens("session-1")).toBe(2);
+    expect(await db.resolveAccessToken(vision.token)).toBeNull();
+  });
+
+  it("reconciles orphan sessions without revoking active sessions", async () => {
+    const active = await db.upsertSessionAccessToken({
+      externalSessionId: "active-session",
+      slot: "primary",
+      name: "active",
+      allowedKeys: ["primary-key"],
+    });
+    const orphan = await db.upsertSessionAccessToken({
+      externalSessionId: "orphan-session",
+      slot: "primary",
+      name: "orphan",
+      allowedKeys: ["primary-key"],
+    });
+
+    expect(await db.reconcileSessionAccessTokens(["active-session"])).toEqual(["orphan-session"]);
+    expect(await db.resolveAccessToken(active.token)).not.toBeNull();
+    expect(await db.resolveAccessToken(orphan.token)).toBeNull();
+  });
+
+  it("stores request metadata without prompts, responses, or credentials", async () => {
+    await db.updateSettings({ enableObservability: true, observabilityBatchSize: 1 });
+    await db.saveRequestDetail({
+      id: "metadata-only",
+      provider: "claude",
+      model: "test",
+      connectionId: "account-a",
+      status: "success",
+      request: {
+        headers: { authorization: "Bearer plaintext-secret" },
+        body: { messages: [{ role: "user", content: "private prompt" }] },
+      },
+      providerRequest: { apiKey: "provider-secret" },
+      providerResponse: { content: "private provider response" },
+      response: { content: "private response" },
+      tokens: { prompt_tokens: 2, completion_tokens: 3 },
+    });
+
+    let detail = null;
+    for (let attempt = 0; attempt < 20 && !detail; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      detail = await db.getRequestDetailById("metadata-only");
+    }
+    expect(detail).toMatchObject({
+      provider: "claude",
+      model: "test",
+      connectionId: "account-a",
+      tokens: { prompt_tokens: 2, completion_tokens: 3 },
+    });
+    expect(detail).not.toHaveProperty("request");
+    expect(JSON.stringify(detail)).not.toContain("private");
+    expect(JSON.stringify(detail)).not.toContain("secret");
+  });
+});
+
+describe("AIProxy provider-key routing", () => {
+  const members = [
+    { model: "claude/a", connectionId: "account-a" },
+    { model: "claude/b", connectionId: "account-b" },
+  ];
+
+  it("persists round-robin position", async () => {
+    await db.upsertProviderKeyState("round-robin-key", "round-robin", members);
+    const first = await db.selectProviderKeyMembers("round-robin-key", members);
+    const second = await db.selectProviderKeyMembers("round-robin-key", members);
+
+    expect(first[0].connectionId).toBe("account-a");
+    expect(second[0].connectionId).toBe("account-b");
+  });
+
+  it("uses persisted request counts for least-used selection", async () => {
+    await db.upsertProviderKeyState("least-used-key", "least-used", members);
+    const first = await db.selectProviderKeyMembers("least-used-key", members);
+    const second = await db.selectProviderKeyMembers("least-used-key", members);
+
+    expect(first[0].connectionId).toBe("account-a");
+    expect(second[0].connectionId).toBe("account-b");
+  });
+
+  it("pins account selection instead of falling through to another account", async () => {
+    const first = await db.createProviderConnection({
+      provider: "claude",
+      authType: "apikey",
+      name: "first",
+      apiKey: "first-secret",
+    });
+    const second = await db.createProviderConnection({
+      provider: "claude",
+      authType: "apikey",
+      name: "second",
+      apiKey: "second-secret",
+    });
+    const { getProviderCredentials } = await import("@/sse/services/auth.js");
+
+    expect((await getProviderCredentials(
+      "claude",
+      null,
+      "test",
+      { preferredConnectionId: second.id }
+    )).connectionId).toBe(second.id);
+
+    await db.updateProviderConnection(second.id, { isActive: false });
+    expect(await getProviderCredentials(
+      "claude",
+      null,
+      "test",
+      { preferredConnectionId: second.id }
+    )).toBeNull();
+    expect(first.id).not.toBe(second.id);
+  }, 10000);
+});

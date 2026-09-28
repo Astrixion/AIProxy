@@ -32,11 +32,24 @@ export {
   getApiKeys, getApiKeyById, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
 } from "./repos/apiKeysRepo.js";
 
+// Hash-only scoped access tokens
+export {
+  getAccessTokens, resolveAccessToken, validateAccessToken,
+  createManualAccessToken, upsertSessionAccessToken,
+  revokeAccessToken, revokeSessionAccessTokens, reconcileSessionAccessTokens,
+} from "./repos/accessTokensRepo.js";
+
 // Combos
 export {
   getCombos, getComboById, getComboByName,
   createCombo, updateCombo, deleteCombo,
 } from "./repos/combosRepo.js";
+
+// Exact-account provider-key routing state
+export {
+  PROVIDER_KEY_STRATEGIES, getProviderKeyState, upsertProviderKeyState,
+  deleteProviderKeyState, selectProviderKeyMembers,
+} from "./repos/providerKeyStatesRepo.js";
 
 // Aliases (model + custom + mitm)
 export {
@@ -78,7 +91,9 @@ export async function exportDb() {
     providerNodes: db.all(`SELECT * FROM providerNodes`).map((r) => ({ ...parseJson(r.data, {}), id: r.id, type: r.type, name: r.name, createdAt: r.createdAt, updatedAt: r.updatedAt })),
     proxyPools: db.all(`SELECT * FROM proxyPools`).map((r) => ({ ...parseJson(r.data, {}), id: r.id, isActive: r.isActive === 1, testStatus: r.testStatus, createdAt: r.createdAt, updatedAt: r.updatedAt })),
     apiKeys: db.all(`SELECT * FROM apiKeys`).map((r) => ({ id: r.id, key: r.key, name: r.name, machineId: r.machineId, isActive: r.isActive === 1, createdAt: r.createdAt })),
+    accessTokens: db.all(`SELECT * FROM accessTokens`).map((r) => ({ ...r, allowedKeys: parseJson(r.allowedKeys, []), isActive: r.isActive === 1 })),
     combos: db.all(`SELECT * FROM combos`).map((r) => ({ id: r.id, name: r.name, kind: r.kind, models: parseJson(r.models, []), createdAt: r.createdAt, updatedAt: r.updatedAt })),
+    providerKeyStates: db.all(`SELECT * FROM providerKeyStates`).map((r) => ({ ...r, members: parseJson(r.members, []), usageCounts: parseJson(r.usageCounts, {}) })),
     modelAliases: {},
     customModels: [],
     mitmAlias: {},
@@ -106,7 +121,9 @@ export async function importDb(payload) {
     db.run(`DELETE FROM providerNodes`);
     db.run(`DELETE FROM proxyPools`);
     db.run(`DELETE FROM apiKeys`);
+    db.run(`DELETE FROM accessTokens`);
     db.run(`DELETE FROM combos`);
+    db.run(`DELETE FROM providerKeyStates`);
     db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`);
 
     // Settings
@@ -141,10 +158,38 @@ export async function importDb(payload) {
         [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString()]
       );
     }
+    for (const token of payload.accessTokens || []) {
+      db.run(
+        `INSERT OR REPLACE INTO accessTokens(
+           id, tokenHash, name, kind, externalSessionId, slot, allowedKeys,
+           isActive, createdAt, updatedAt
+         ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          token.id, token.tokenHash, token.name, token.kind,
+          token.externalSessionId || null, token.slot || null,
+          stringifyJson(token.allowedKeys || []), token.isActive === false ? 0 : 1,
+          token.createdAt || new Date().toISOString(),
+          token.updatedAt || new Date().toISOString(),
+        ]
+      );
+    }
     for (const c of payload.combos || []) {
       db.run(
         `INSERT OR REPLACE INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)`,
         [c.id, c.name, c.kind || null, stringifyJson(c.models || []), c.createdAt || new Date().toISOString(), c.updatedAt || new Date().toISOString()]
+      );
+    }
+    for (const state of payload.providerKeyStates || []) {
+      db.run(
+        `INSERT OR REPLACE INTO providerKeyStates(
+           name, strategy, members, rotationIndex, usageCounts, createdAt, updatedAt
+         ) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+        [
+          state.name, state.strategy, stringifyJson(state.members || []),
+          state.rotationIndex || 0, stringifyJson(state.usageCounts || {}),
+          state.createdAt || new Date().toISOString(),
+          state.updatedAt || new Date().toISOString(),
+        ]
       );
     }
     for (const [a, m] of Object.entries(payload.modelAliases || {})) {

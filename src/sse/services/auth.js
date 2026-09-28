@@ -1,4 +1,4 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
+import { getProviderConnections, validateAccessToken, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
@@ -144,6 +144,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections.find((c) => c.id === preferredConnectionId);
       if (connection) {
         log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
+      } else {
+        log.warn("AUTH", `${provider} | pinned connection ${preferredConnectionId.slice(0, 8)} is unavailable`);
+        return null;
       }
     }
     if (connection) {
@@ -360,5 +363,5 @@ export function extractApiKey(request) {
  */
 export async function isValidApiKey(apiKey) {
   if (!apiKey) return false;
-  return await validateApiKey(apiKey);
+  return await validateApiKey(apiKey) || await validateAccessToken(apiKey);
 }

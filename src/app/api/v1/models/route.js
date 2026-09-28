@@ -18,6 +18,8 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
+import { extractApiKey } from "@/sse/services/auth.js";
+import { resolveScopedCredential, RESERVED_ALL_KEY } from "@/lib/aiproxy/accessControl.js";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
 // credentials carry the provider id so qoderModels picks the right region's
@@ -254,6 +256,16 @@ function comboMatchesKinds(combo, kindFilter) {
   return kindFilter.includes(kind);
 }
 
+function isLlmCombo(combo) {
+  return !combo?.kind || combo.kind === LLM_KIND;
+}
+
+function comboModelIds(combo) {
+  return (combo?.models || [])
+    .map((member) => typeof member === "string" ? member : member?.model)
+    .filter(Boolean);
+}
+
 /**
  * Build OpenAI-format models list filtered by service kinds.
  * @param {string[]} kindFilter - List of service kinds to include (e.g. ["llm"], ["webSearch","webFetch"]).
@@ -310,7 +322,7 @@ export async function buildModelsList(kindFilter, options = {}) {
   const models = [];
 
   // Lookup map so aggregateComboCapabilities can recursively resolve nested combos
-  const comboByName = Object.fromEntries(combos.map((c) => [c.name, c.models]));
+  const comboByName = Object.fromEntries(combos.map((c) => [c.name, comboModelIds(c)]));
 
   // Combos first (filtered by kind). Web combos expose `kind` so AI knows search vs fetch.
   for (const combo of combos) {
@@ -323,10 +335,22 @@ export async function buildModelsList(kindFilter, options = {}) {
     if (combo.kind === "webSearch" || combo.kind === "webFetch") {
       entry.kind = combo.kind;
     } else {
-      const comboCaps = aggregateComboCapabilities(combo.models, comboByName);
+      const comboCaps = aggregateComboCapabilities(comboModelIds(combo), comboByName);
       if (comboCaps) entry.capabilities = comboCaps;
     }
     models.push(entry);
+  }
+
+  if (
+    kindFilter.includes(LLM_KIND)
+    && combos.some((combo) => isLlmCombo(combo) && combo.models?.length > 0)
+    && !models.some((model) => model.id === RESERVED_ALL_KEY)
+  ) {
+    const allModels = combos.filter(isLlmCombo).flatMap(comboModelIds);
+    const entry = { id: RESERVED_ALL_KEY, object: "model", owned_by: "combo" };
+    const capabilities = aggregateComboCapabilities(allModels, comboByName);
+    if (capabilities) entry.capabilities = capabilities;
+    models.unshift(entry);
   }
 
   if (connections.length === 0) {
@@ -586,7 +610,16 @@ export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-    const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+    let data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+    const presentedToken = extractApiKey(request);
+    const scopedCredential = await resolveScopedCredential(presentedToken);
+    if (presentedToken?.startsWith("aip_sk_") && !scopedCredential) {
+      return Response.json({ error: { message: "Invalid access token" } }, { status: 401 });
+    }
+    if (scopedCredential) {
+      const allowed = new Set(scopedCredential.allowedKeys);
+      data = data.filter((model) => model.owned_by === "combo" && allowed.has(model.id));
+    }
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });

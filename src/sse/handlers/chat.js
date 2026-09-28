@@ -25,6 +25,8 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
+import { credentialAllowsKey, resolveScopedCredential } from "@/lib/aiproxy/accessControl.js";
+import { getExactProviderKeyMembers } from "@/lib/aiproxy/providerKeys.js";
 
 /**
  * Handle chat completion request
@@ -60,6 +62,7 @@ export async function handleChat(request, clientRawRequest = null) {
   // Log API key (masked)
   const authHeader = request.headers.get("Authorization");
   const apiKey = extractApiKey(request);
+  const scopedCredential = await resolveScopedCredential(apiKey);
   if (authHeader && apiKey) {
     const masked = log.maskKey(apiKey);
     log.debug("AUTH", `API Key: ${masked}`);
@@ -81,10 +84,24 @@ export async function handleChat(request, clientRawRequest = null) {
     }
   }
 
+  if (apiKey?.startsWith("aip_sk_") && !scopedCredential) {
+    log.warn("AUTH", "Invalid or revoked scoped access token");
+    return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid access token");
+  }
+
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
   }
+
+  if (scopedCredential && !credentialAllowsKey(scopedCredential, modelStr)) {
+    log.warn("AUTH", `Access token ${scopedCredential.id} cannot use provider key ${modelStr}`);
+    return errorResponse(HTTP_STATUS.FORBIDDEN, `Access token cannot use provider key '${modelStr}'`);
+  }
+
+  // Never persist the presented scoped credential in usage history. The stable
+  // record id is enough for attribution and cannot be used to make requests.
+  const usageApiKey = scopedCredential ? `access:${scopedCredential.id}` : apiKey;
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
@@ -93,6 +110,21 @@ export async function handleChat(request, clientRawRequest = null) {
 
   const requiredCapabilities = detectRequiredCapabilities(body);
 
+  // AIProxy provider keys extend 9Router combos with exact account+model members.
+  // Keep this local so upstream provider adapters, translators, and combo code stay unchanged.
+  const exactMembers = await getExactProviderKeyMembers(modelStr);
+  if (exactMembers) {
+    log.info("CHAT", `Provider key "${modelStr}" with ${exactMembers.length} exact members`);
+    return handleExactProviderKeyChat({
+      body,
+      members: exactMembers,
+      clientRawRequest,
+      request,
+      usageApiKey,
+      keyName: modelStr,
+    });
+  }
+
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
   if (comboModels) {
@@ -100,7 +132,9 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
+    const augmentedModels = scopedCredential
+      ? comboModels
+      : augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
     if (comboStrategy === "fusion") {
@@ -114,7 +148,7 @@ export async function handleChat(request, clientRawRequest = null) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+          return handleSingleModelChat(b, m, cleanRawReq, request, usageApiKey);
         },
         log,
         comboName: modelStr,
@@ -129,7 +163,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, usageApiKey),
         adapterAdded
       ),
       log,
@@ -149,7 +183,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, usageApiKey),
         adapterAdded
       ),
       log,
@@ -158,13 +192,62 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, usageApiKey);
+}
+
+async function handleExactProviderKeyChat({
+  body,
+  members,
+  clientRawRequest,
+  request,
+  usageApiKey,
+  keyName,
+}) {
+  const routes = members.map((member, index) => ({
+    id: `member-${index + 1}`,
+    member,
+  }));
+  const byId = new Map(routes.map((route) => [route.id, route.member]));
+
+  return handleComboChat({
+    body,
+    models: routes.map((route) => route.id),
+    handleSingleModel: (nextBody, routeId) => {
+      const member = byId.get(routeId);
+      if (!member) throw new Error(`Unknown provider-key route '${routeId}'`);
+      log.info(
+        "CHAT",
+        `Provider key "${keyName}" trying ${member.model} on connection ${member.connectionId || "auto"}`
+      );
+      return handleSingleModelChat(
+        nextBody,
+        member.model,
+        clientRawRequest,
+        request,
+        usageApiKey,
+        member.connectionId,
+        false
+      );
+    },
+    log,
+    comboName: `aiproxy:${keyName}`,
+    comboStrategy: "fallback",
+    autoSwitch: false,
+  });
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+async function handleSingleModelChat(
+  body,
+  modelStr,
+  clientRawRequest = null,
+  request = null,
+  apiKey = null,
+  preferredConnectionId = null,
+  allowCapacityAdapters = true
+) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -177,7 +260,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       const requiredCapabilities = detectRequiredCapabilities(body);
-      const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
+      const augmentedModels = allowCapacityAdapters
+        ? augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings)
+        : comboModels;
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
       if (comboStrategy === "fusion") {
@@ -191,7 +276,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+            return handleSingleModelChat(
+              b,
+              m,
+              cleanRawReq,
+              request,
+              apiKey,
+              null,
+              allowCapacityAdapters
+            );
           },
           log,
           comboName: modelStr,
@@ -206,7 +299,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+          (b, m) => handleSingleModelChat(
+            b,
+            m,
+            clientRawRequest,
+            request,
+            apiKey,
+            null,
+            allowCapacityAdapters
+          ),
           adapterAdded
         ),
         log,
@@ -233,7 +334,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastHeaders = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(
+      provider,
+      excludeConnectionIds,
+      model,
+      { preferredConnectionId }
+    );
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -244,6 +350,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman, lastHeaders);
       }
       if (excludeConnectionIds.size === 0) {
+        if (preferredConnectionId) {
+          log.warn("AUTH", `Pinned provider connection unavailable: ${preferredConnectionId}`);
+          return errorResponse(
+            HTTP_STATUS.SERVICE_UNAVAILABLE,
+            `Pinned provider connection unavailable for ${provider}/${model}`
+          );
+        }
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
