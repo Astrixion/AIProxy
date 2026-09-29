@@ -19,8 +19,12 @@ beforeAll(async () => {
   await db.initDb();
   adapter = await adapter();
 
-  await db.createCombo({ name: "primary-key", kind: "llm", models: ["claude/test"] });
-  await db.createCombo({ name: "vision-key", kind: "llm", models: ["claude/vision"] });
+  await db.upsertProviderKeyState("primary-key", "round-robin", [
+    { model: "claude/test", connectionId: "account-a" },
+  ]);
+  await db.upsertProviderKeyState("vision-key", "round-robin", [
+    { model: "claude/vision", connectionId: "account-b" },
+  ]);
 });
 
 afterAll(() => {
@@ -65,16 +69,33 @@ describe("AIProxy scoped credentials", () => {
       externalSessionId: "session-1",
       slot: "primary",
       name: "coordinator retry",
-      allowedKeys: ["primary-key", "vision-key"],
+      allowedKeys: ["primary-key"],
     });
 
     expect(retry.token).toBe(first.token);
     expect(retry.record.id).toBe(first.record.id);
-    expect(retry.record.allowedKeys).toEqual(["primary-key", "vision-key"]);
+    expect(retry.record.allowedKeys).toEqual(["primary-key"]);
     expect(adapter.get(
       `SELECT COUNT(*) AS count FROM accessTokens WHERE externalSessionId = ? AND slot = ?`,
       ["session-1", "primary"]
     ).count).toBe(1);
+  });
+
+  it("rejects scope changes and never resurrects revoked session credentials", async () => {
+    await expect(db.upsertSessionAccessToken({
+      externalSessionId: "session-1",
+      slot: "primary",
+      name: "changed",
+      allowedKeys: ["vision-key"],
+    })).rejects.toMatchObject({ statusCode: 409 });
+
+    await db.revokeSessionAccessTokens("session-1");
+    await expect(db.upsertSessionAccessToken({
+      externalSessionId: "session-1",
+      slot: "primary",
+      name: "revived",
+      allowedKeys: ["primary-key"],
+    })).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it("revokes every credential for a permanently deleted session", async () => {
@@ -85,7 +106,7 @@ describe("AIProxy scoped credentials", () => {
       allowedKeys: ["vision-key"],
     });
 
-    expect(await db.revokeSessionAccessTokens("session-1")).toBe(2);
+    expect(await db.revokeSessionAccessTokens("session-1")).toBe(1);
     expect(await db.resolveAccessToken(vision.token)).toBeNull();
   });
 
@@ -103,7 +124,9 @@ describe("AIProxy scoped credentials", () => {
       allowedKeys: ["primary-key"],
     });
 
-    expect(await db.reconcileSessionAccessTokens(["active-session"])).toEqual(["orphan-session"]);
+    const afterGrace = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    expect(await db.reconcileSessionAccessTokens(["active-session"], afterGrace))
+      .toEqual(["orphan-session"]);
     expect(await db.resolveAccessToken(active.token)).not.toBeNull();
     expect(await db.resolveAccessToken(orphan.token)).toBeNull();
   });
@@ -140,6 +163,91 @@ describe("AIProxy scoped credentials", () => {
     expect(detail).not.toHaveProperty("request");
     expect(JSON.stringify(detail)).not.toContain("private");
     expect(JSON.stringify(detail)).not.toContain("secret");
+  });
+
+  it("records content-free provider history by external session", async () => {
+    const request = await db.startProviderRequest({
+      externalSessionId: "trace-session",
+      tokenId: "token-id",
+      slot: "primary",
+      virtualKey: "primary-key",
+      provider: "claude",
+      upstreamModel: "claude/test",
+      connectionId: "account-a",
+    });
+    await db.completeProviderRequest(request.id, {
+      status: "complete",
+      usage: { input: 2, output: 3, cacheRead: null, cacheWrite: null, complete: true },
+    });
+
+    const [stored] = await db.getProviderRequestsForSession("trace-session");
+    expect(stored).toMatchObject({
+      virtualKey: "primary-key",
+      connectionId: "account-a",
+      usage: { input: 2, output: 3, complete: true },
+    });
+    expect(JSON.stringify(stored)).not.toContain("prompt");
+    expect(JSON.stringify(stored)).not.toContain("secret");
+  });
+
+  it("does not accept scoped credentials as general 9Router API keys", async () => {
+    const issued = await db.createManualAccessToken("scoped-only", ["primary-key"]);
+    const { isValidApiKey } = await import("@/sse/services/auth.js");
+    expect(await isValidApiKey(issued.token)).toBe(false);
+  });
+});
+
+describe("AIProxy Anthropic facade", () => {
+  it("rejects malformed Messages requests before routing", async () => {
+    const { validateMessagesRequest } = await import("@/lib/aiproxy/anthropicFacade.js");
+    expect(validateMessagesRequest({ model: "primary-key", messages: [] }))
+      .toBe("Messages requests must set max_tokens to a positive integer.");
+    expect(validateMessagesRequest({
+      model: "primary-key",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "hello" }],
+    })).toBeNull();
+  });
+
+  it("normalizes JSON responses to Anthropic Messages with the virtual model", async () => {
+    const { normalizeFacadeResponse } = await import("@/lib/aiproxy/anthropicFacade.js");
+    const upstream = Response.json({
+      id: "chatcmpl-1",
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "done",
+          tool_calls: [{ id: "call-1", function: { name: "lookup", arguments: '{"id":7}' } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 11, completion_tokens: 5 },
+    });
+
+    const response = await normalizeFacadeResponse(upstream, "primary-key", false);
+    await expect(response.json()).resolves.toMatchObject({
+      type: "message",
+      model: "primary-key",
+      stop_reason: "tool_use",
+      content: [
+        { type: "text", text: "done" },
+        { type: "tool_use", name: "lookup", input: { id: 7 } },
+      ],
+      usage: { input_tokens: 11, output_tokens: 5 },
+    });
+  });
+
+  it("rewrites streaming model identities to the virtual key", async () => {
+    const { normalizeFacadeResponse } = await import("@/lib/aiproxy/anthropicFacade.js");
+    const upstream = new Response(
+      'event: message_start\ndata: {"type":"message_start","message":{"model":"claude/test"}}\n\n',
+      { headers: { "Content-Type": "text/event-stream" } }
+    );
+
+    const response = await normalizeFacadeResponse(upstream, "primary-key", true);
+    const body = await response.text();
+    expect(body).toContain('"model":"primary-key"');
+    expect(body).not.toContain("claude/test");
   });
 });
 

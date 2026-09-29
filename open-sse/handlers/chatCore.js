@@ -156,7 +156,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     stream = false;
   }
 
-  const reqLogger = await createRequestLogger(sourceFormat, targetFormat, model);
+  // Scoped AIProxy requests must never write prompts, responses, or provider
+  // credentials to 9Router's diagnostic request-log files.
+  const reqLogger = await createRequestLogger(sourceFormat, targetFormat, model, {
+    enabled: !String(apiKey || "").startsWith("access:"),
+  });
   if (clientRawRequest) reqLogger.logClientRawRequest(clientRawRequest.endpoint, clientRawRequest.body, clientRawRequest.headers);
   reqLogger.logRawRequest(body);
   log?.debug?.("FORMAT", `${sourceFormat} → ${targetFormat} | stream=${stream}`);

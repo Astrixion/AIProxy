@@ -37,7 +37,9 @@ and dashboard. It adds the control-plane boundary needed by Misanthropic:
 - metadata-only request history.
 
 Set `AIPROXY_CONTROL_TOKEN` and `AIPROXY_SESSION_TOKEN_SECRET` before using
-`/api/internal/*`. Scoped credentials can call only `/v1/messages` and `/v1/models`.
+`/api/internal/*`, and set `AIPROXY_PROVIDER_BASE_URL` to the externally routed
+base URL ending in `/provider`. Scoped credentials can call only the Anthropic-compatible
+`/provider/v1/messages` and `/provider/v1/models` facade.
 The original 9Router global API keys remain available for dashboard and upstream compatibility.
 
 ---
@@ -1340,6 +1342,7 @@ docker pull decolua/9router:latest   # update to latest
 | `API_KEY_SECRET`                                     | `endpoint-proxy-api-key-secret`          | HMAC secret for generated API keys                                                  |
 | `AIPROXY_CONTROL_TOKEN`                              | none                                     | Bearer token for `/api/internal/*`                                                   |
 | `AIPROXY_SESSION_TOKEN_SECRET`                       | none                                     | HMAC secret for deterministic session credentials (minimum 32 characters)           |
+| `AIPROXY_PROVIDER_BASE_URL`                          | request origin + `/provider`             | Base URL returned in session credential descriptors                                 |
 | `MACHINE_ID_SALT`                                    | `endpoint-proxy-salt`                    | Salt for stable machine ID hashing                                                  |
 | `ENABLE_REQUEST_LOGS`                                | `false`                                  | Enables request/response logs under `logs/`                                         |
 | `AUTH_COOKIE_SECURE`                                 | `false`                                  | Force `Secure` auth cookie (set `true` behind HTTPS reverse proxy)                  |

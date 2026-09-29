@@ -1,18 +1,15 @@
 import {
-  createCombo,
-  deleteCombo,
   deleteProviderKeyState,
-  getComboByName,
-  getCombos,
   getProviderConnectionById,
   getProviderKeyState,
+  getProviderKeyStates,
   PROVIDER_KEY_STRATEGIES,
   selectProviderKeyMembers,
-  updateCombo,
   upsertProviderKeyState,
 } from "@/lib/localDb";
 import { resolveProviderId } from "@/shared/constants/providers.js";
 import { getModelInfo } from "@/sse/services/model.js";
+import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { RESERVED_ALL_KEY } from "./accessControl.js";
 
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
@@ -27,45 +24,30 @@ export function normalizeProviderKeyMember(member) {
   return model ? { model, connectionId: connectionId || null } : null;
 }
 
-function isLlmCombo(combo) {
-  return !combo.kind || combo.kind === "llm";
-}
-
-function comboMembers(combo) {
-  return (combo?.models || []).map(normalizeProviderKeyMember).filter(Boolean);
-}
-
 export async function getExactProviderKeyMembers(name) {
   if (name === RESERVED_ALL_KEY) {
-    const combos = (await getCombos()).filter(
-      (combo) => combo.name !== RESERVED_ALL_KEY && isLlmCombo(combo)
-    );
-    const members = (await Promise.all(combos.map(async (combo) => {
-      const state = await getProviderKeyState(combo.name);
-      return state?.members?.length > 0 ? state.members : comboMembers(combo);
-    }))).flat();
+    const members = (await getProviderKeyStates())
+      .filter((state) => state.name !== RESERVED_ALL_KEY)
+      .flatMap((state) => state.members);
     return members.length > 0
       ? selectProviderKeyMembers(RESERVED_ALL_KEY, members, "round-robin")
       : null;
   }
 
-  const combo = await getComboByName(name);
-  if (!combo || !isLlmCombo(combo)) return null;
   const state = await getProviderKeyState(name);
-  if (!state?.members?.some((member) => member.connectionId)) return null;
+  if (!state?.members?.every((member) => member.connectionId)) return null;
   return selectProviderKeyMembers(name, state.members);
 }
 
 export async function listProviderKeys() {
-  const combos = (await getCombos()).filter(isLlmCombo);
-  const keys = await Promise.all(combos.map(async (combo) => {
-    const state = await getProviderKeyState(combo.name);
-    return {
-      name: combo.name,
-      members: state?.members?.length > 0 ? state.members : comboMembers(combo),
-      strategy: state?.strategy || "fill-first",
-    };
-  }));
+  const keys = (await getProviderKeyStates())
+    .filter((state) => state.name !== RESERVED_ALL_KEY)
+    .map((state) => ({
+      name: state.name,
+      members: state.members,
+      strategy: state.strategy,
+      contextWindow: contextWindowForMembers(state.members),
+    }));
   return {
     keys,
     reservedKey: {
@@ -74,6 +56,29 @@ export async function listProviderKeys() {
       strategy: "round-robin",
     },
   };
+}
+
+export function contextWindowForMembers(members) {
+  if (!members?.length) return 128000;
+  return Math.min(...members.map((member) => {
+    const slash = member.model.indexOf("/");
+    const provider = slash === -1 ? null : member.model.slice(0, slash);
+    const model = slash === -1 ? member.model : member.model.slice(slash + 1);
+    const value = Number(getCapabilitiesForModel(provider, model)?.contextWindow);
+    // 9Router's generic capability fallback is 200K. Misanthropic's contract
+    // intentionally advertises an unknown member conservatively as 128K.
+    return Number.isFinite(value) && value !== 200000 ? value : 128000;
+  }));
+}
+
+export async function getProviderKeyDescriptor(name) {
+  if (name === RESERVED_ALL_KEY) {
+    const states = (await getProviderKeyStates()).filter((state) => state.name !== RESERVED_ALL_KEY);
+    const members = states.flatMap((state) => state.members);
+    return members.length ? { name, members, strategy: "round-robin", contextWindow: contextWindowForMembers(members) } : null;
+  }
+  const state = await getProviderKeyState(name);
+  return state ? { ...state, contextWindow: contextWindowForMembers(state.members) } : null;
 }
 
 export async function validateProviderKeyInput(name, body) {
@@ -118,22 +123,23 @@ export async function validateProviderKeyInput(name, body) {
 
 export async function putProviderKey(name, body) {
   const members = await validateProviderKeyInput(name, body);
-  const strategy = body.strategy || "fill-first";
+  const strategy = body.strategy || "round-robin";
   if (!PROVIDER_KEY_STRATEGIES.includes(strategy)) {
     throw new Error(`Unknown provider key strategy '${strategy}'`);
   }
-  const existing = await getComboByName(name);
-  const combo = existing
-    ? await updateCombo(existing.id, { name, kind: "llm", models: members.map((member) => member.model) })
-    : await createCombo({ name, kind: "llm", models: members.map((member) => member.model) });
+  const collision = (await getProviderKeyStates()).find(
+    (state) => state.name.toLowerCase() === name.toLowerCase() && state.name !== name
+  );
+  if (collision) throw new Error(`Provider key '${collision.name}' already uses that name`);
   const state = await upsertProviderKeyState(name, strategy, members);
-  return { name: combo.name, members: state.members, strategy: state.strategy };
+  return {
+    name: state.name,
+    members: state.members,
+    strategy: state.strategy,
+    contextWindow: contextWindowForMembers(state.members),
+  };
 }
 
 export async function removeProviderKey(name) {
-  const combo = await getComboByName(name);
-  if (!combo) return false;
-  await deleteCombo(combo.id);
-  await deleteProviderKeyState(name);
-  return true;
+  return deleteProviderKeyState(name);
 }

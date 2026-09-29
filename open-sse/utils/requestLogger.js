@@ -114,9 +114,9 @@ function createNoOpLogger() {
  * @param {string} model - Model name
  * @returns {Promise<object>} Promise that resolves to logger object with methods to log each stage
  */
-export async function createRequestLogger(sourceFormat, targetFormat, model) {
+export async function createRequestLogger(sourceFormat, targetFormat, model, options = {}) {
   // Return no-op logger if logging is disabled
-  if (!LOGGING_ENABLED) {
+  if (!LOGGING_ENABLED || options.enabled === false) {
     return createNoOpLogger();
   }
   

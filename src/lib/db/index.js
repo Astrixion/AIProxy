@@ -47,9 +47,14 @@ export {
 
 // Exact-account provider-key routing state
 export {
-  PROVIDER_KEY_STRATEGIES, getProviderKeyState, upsertProviderKeyState,
+  PROVIDER_KEY_STRATEGIES, getProviderKeyState, getProviderKeyStates, upsertProviderKeyState,
   deleteProviderKeyState, selectProviderKeyMembers,
 } from "./repos/providerKeyStatesRepo.js";
+
+// Content-free provider routing and usage history
+export {
+  startProviderRequest, completeProviderRequest, getProviderRequestsForSession,
+} from "./repos/providerRequestsRepo.js";
 
 // Aliases (model + custom + mitm)
 export {

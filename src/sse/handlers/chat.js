@@ -27,16 +27,17 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { credentialAllowsKey, resolveScopedCredential } from "@/lib/aiproxy/accessControl.js";
 import { getExactProviderKeyMembers } from "@/lib/aiproxy/providerKeys.js";
+import { beginProviderRequest, observeProviderResponse } from "@/lib/aiproxy/requestHistory.js";
 
 /**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
  */
-export async function handleChat(request, clientRawRequest = null) {
+export async function handleChat(request, clientRawRequest = null, options = {}) {
   let body;
   try {
-    body = await request.json();
+    body = options.body ?? await request.json();
   } catch {
     log.warn("CHAT", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
@@ -62,7 +63,7 @@ export async function handleChat(request, clientRawRequest = null) {
   // Log API key (masked)
   const authHeader = request.headers.get("Authorization");
   const apiKey = extractApiKey(request);
-  const scopedCredential = await resolveScopedCredential(apiKey);
+  const scopedCredential = options.scopedCredential ?? await resolveScopedCredential(apiKey);
   if (authHeader && apiKey) {
     const masked = log.maskKey(apiKey);
     log.debug("AUTH", `API Key: ${masked}`);
@@ -77,7 +78,7 @@ export async function handleChat(request, clientRawRequest = null) {
       log.warn("AUTH", "Missing API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
     }
-    const valid = await isValidApiKey(apiKey);
+    const valid = scopedCredential || await isValidApiKey(apiKey);
     if (!valid) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
@@ -122,7 +123,12 @@ export async function handleChat(request, clientRawRequest = null) {
       request,
       usageApiKey,
       keyName: modelStr,
+      credential: scopedCredential,
     });
+  }
+
+  if (scopedCredential) {
+    return errorResponse(HTTP_STATUS.NOT_FOUND, `Unknown provider key '${modelStr}'`);
   }
 
   // Check if model is a combo (has multiple models with fallback)
@@ -202,38 +208,29 @@ async function handleExactProviderKeyChat({
   request,
   usageApiKey,
   keyName,
+  credential,
 }) {
-  const routes = members.map((member, index) => ({
-    id: `member-${index + 1}`,
-    member,
-  }));
-  const byId = new Map(routes.map((route) => [route.id, route.member]));
-
-  return handleComboChat({
+  const member = members[0];
+  log.info(
+    "CHAT",
+    `Provider key "${keyName}" selected ${member.model} on connection ${member.connectionId}`
+  );
+  let trace = null;
+  try {
+    trace = await beginProviderRequest({ credential, virtualKey: keyName, member });
+  } catch (error) {
+    console.error("[AIProxy] Failed to record provider route:", error);
+  }
+  const response = await handleSingleModelChat(
     body,
-    models: routes.map((route) => route.id),
-    handleSingleModel: (nextBody, routeId) => {
-      const member = byId.get(routeId);
-      if (!member) throw new Error(`Unknown provider-key route '${routeId}'`);
-      log.info(
-        "CHAT",
-        `Provider key "${keyName}" trying ${member.model} on connection ${member.connectionId || "auto"}`
-      );
-      return handleSingleModelChat(
-        nextBody,
-        member.model,
-        clientRawRequest,
-        request,
-        usageApiKey,
-        member.connectionId,
-        false
-      );
-    },
-    log,
-    comboName: `aiproxy:${keyName}`,
-    comboStrategy: "fallback",
-    autoSwitch: false,
-  });
+    member.model,
+    clientRawRequest,
+    request,
+    usageApiKey,
+    member.connectionId,
+    false
+  );
+  return trace ? observeProviderResponse(response, trace.id) : response;
 }
 
 /**

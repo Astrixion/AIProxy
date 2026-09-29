@@ -8,7 +8,6 @@ const mocks = vi.hoisted(() => ({
   jsonResponse: vi.fn((body, init) => ({ status: init?.status || 200, body })),
   getSettings: vi.fn(),
   validateApiKey: vi.fn(),
-  resolveAccessToken: vi.fn(),
   getConsistentMachineId: vi.fn(),
   verifyDashboardAuthToken: vi.fn(),
 }));
@@ -24,7 +23,6 @@ vi.mock("next/server", () => ({
 vi.mock("@/lib/localDb", () => ({
   getSettings: mocks.getSettings,
   validateApiKey: mocks.validateApiKey,
-  resolveAccessToken: mocks.resolveAccessToken,
 }));
 
 vi.mock("@/shared/utils/machineId", () => ({
@@ -58,7 +56,6 @@ describe("peer header trust", () => {
     process.env.NODE_ENV = "production";
     mocks.getSettings.mockResolvedValue({ requireLogin: true });
     mocks.validateApiKey.mockResolvedValue(false);
-    mocks.resolveAccessToken.mockResolvedValue(null);
     mocks.getConsistentMachineId.mockResolvedValue("cli-token");
     mocks.verifyDashboardAuthToken.mockResolvedValue(false);
   });
@@ -153,6 +150,17 @@ describe("peer header trust", () => {
     }));
 
     expect(response.status).toBe(401);
+  });
+
+  it("confines scoped credentials to the dedicated provider facade", async () => {
+    const headers = { authorization: "Bearer aip_sk_scoped-fixture" };
+
+    const rejected = await proxy(request("/systemone", headers));
+    expect(rejected.status).toBe(403);
+    expect(rejected.body.error).toContain("not valid for this endpoint");
+
+    expect(await proxy(request("/provider/v1/messages", headers)))
+      .toBe(mocks.nextResponse);
   });
 
   it("blocks spoofed local-only routes that would otherwise spawn processes", async () => {

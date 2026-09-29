@@ -27,6 +27,11 @@ export async function getProviderKeyState(name) {
   return rowToState(db.get(`SELECT * FROM providerKeyStates WHERE name = ?`, [name]));
 }
 
+export async function getProviderKeyStates() {
+  const db = await getAdapter();
+  return db.all(`SELECT * FROM providerKeyStates ORDER BY createdAt ASC`).map(rowToState);
+}
+
 export async function upsertProviderKeyState(name, strategy = "fill-first", members = null) {
   if (!PROVIDER_KEY_STRATEGIES.includes(strategy)) {
     throw new Error(`Unknown provider key strategy '${strategy}'`);
@@ -55,10 +60,6 @@ export async function deleteProviderKeyState(name) {
 
 function memberIdentity(member) {
   return `${member.connectionId || ""}\u0000${member.model}`;
-}
-
-function rotateFrom(items, index) {
-  return [...items.slice(index), ...items.slice(0, index)];
 }
 
 export async function selectProviderKeyMembers(name, members, defaultStrategy = "fill-first") {
@@ -106,7 +107,7 @@ export async function selectProviderKeyMembers(name, members, defaultStrategy = 
       });
     }
 
-    ordered = rotateFrom(members, selectedIndex);
+    ordered = [members[selectedIndex]];
     const selectedId = memberIdentity(ordered[0]);
     state.usageCounts[selectedId] = (Number(state.usageCounts[selectedId]) || 0) + 1;
     state.updatedAt = now;

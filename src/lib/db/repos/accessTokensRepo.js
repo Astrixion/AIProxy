@@ -4,6 +4,15 @@ import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 
 const TOKEN_PREFIX = "aip_sk_";
+const RECONCILIATION_GRACE_MS = 5 * 60 * 1000;
+
+export class SessionCredentialConflictError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SessionCredentialConflictError";
+    this.statusCode = 409;
+  }
+}
 
 export function hashAccessToken(token) {
   return createHash("sha256").update(token, "utf8").digest("hex");
@@ -99,20 +108,29 @@ export async function upsertSessionAccessToken({ externalSessionId, slot, name, 
     `SELECT * FROM accessTokens WHERE externalSessionId = ? AND slot = ?`,
     [externalSessionId, slot]
   );
-  const id = existing?.id || uuidv4();
-  const createdAt = existing?.createdAt || now;
+  if (existing) {
+    const existingRecord = rowToAccessToken(existing);
+    if (!existingRecord.isActive) {
+      throw new SessionCredentialConflictError(
+        `Credential '${externalSessionId}:${slot}' was revoked and cannot be reissued`
+      );
+    }
+    const existingKeys = [...existingRecord.allowedKeys].sort();
+    const requestedKeys = [...allowedKeys].sort();
+    if (JSON.stringify(existingKeys) !== JSON.stringify(requestedKeys)) {
+      throw new SessionCredentialConflictError(
+        `Credential '${externalSessionId}:${slot}' already exists with a different scope`
+      );
+    }
+    return { token: plaintext, record: existingRecord };
+  }
+  const id = uuidv4();
 
   db.run(
     `INSERT INTO accessTokens(
        id, tokenHash, name, kind, externalSessionId, slot, allowedKeys,
        isActive, createdAt, updatedAt
-     ) VALUES(?, ?, ?, 'session', ?, ?, ?, 1, ?, ?)
-     ON CONFLICT(externalSessionId, slot) DO UPDATE SET
-       tokenHash = excluded.tokenHash,
-       name = excluded.name,
-       allowedKeys = excluded.allowedKeys,
-       isActive = 1,
-       updatedAt = excluded.updatedAt`,
+     ) VALUES(?, ?, ?, 'session', ?, ?, ?, 1, ?, ?)`,
     [
       id,
       tokenHash,
@@ -120,7 +138,7 @@ export async function upsertSessionAccessToken({ externalSessionId, slot, name, 
       externalSessionId,
       slot,
       stringifyJson(allowedKeys),
-      createdAt,
+      now,
       now,
     ]
   );
@@ -153,16 +171,21 @@ export async function revokeSessionAccessTokens(externalSessionId) {
   return result?.changes ?? 0;
 }
 
-export async function reconcileSessionAccessTokens(activeSessionIds) {
+export async function reconcileSessionAccessTokens(retainedSessionIds, snapshotTakenAt) {
   const db = await getAdapter();
-  const active = new Set(activeSessionIds);
+  const retained = new Set(retainedSessionIds);
+  const snapshotMs = new Date(snapshotTakenAt).getTime();
+  if (!Number.isFinite(snapshotMs)) throw new Error("snapshotTakenAt must be an ISO timestamp");
+  const cutoff = new Date(snapshotMs - RECONCILIATION_GRACE_MS).toISOString();
   const rows = db.all(
     `SELECT DISTINCT externalSessionId FROM accessTokens
-     WHERE kind = 'session' AND isActive = 1 AND externalSessionId IS NOT NULL`
+     WHERE kind = 'session' AND isActive = 1 AND externalSessionId IS NOT NULL
+       AND createdAt <= ?`,
+    [cutoff]
   );
   const orphans = rows
     .map((row) => row.externalSessionId)
-    .filter((sessionId) => !active.has(sessionId));
+    .filter((sessionId) => !retained.has(sessionId));
   if (orphans.length === 0) return [];
 
   const now = new Date().toISOString();

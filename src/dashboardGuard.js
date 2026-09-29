@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSettings, resolveAccessToken, validateApiKey } from "@/lib/localDb";
+import { getSettings, validateApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
 import { hasTrustedPeerHeaders } from "@/lib/auth/trustedPeer";
@@ -152,22 +152,15 @@ function extractApiKey(request) {
 async function hasValidApiKey(request) {
   const apiKey = extractApiKey(request);
   if (!apiKey) return false;
-  if (await validateApiKey(apiKey)) return true;
-
-  const accessToken = await resolveAccessToken(apiKey);
-  if (!accessToken) return false;
-  const path = request.nextUrl.pathname;
-  return path === "/v1/messages"
-    || path === "/api/v1/messages"
-    || path === "/v1/models"
-    || path === "/api/v1/models";
+  return await validateApiKey(apiKey);
 }
 
 async function canAccessPublicLlmApi(request) {
-  // Scoped credentials never inherit localhost/CLI bypasses and are valid only
-  // on the Anthropic Messages and filtered model-list endpoints.
+  // Scoped credentials are accepted only by the dedicated /provider facade.
+  // Never let localhost, CLI, query-string, or Google-key compatibility turn
+  // one into a general 9Router API key.
   if (extractApiKey(request)?.startsWith("aip_sk_")) {
-    return await hasValidApiKey(request);
+    return false;
   }
   if (isLocalRequest(request)) return true;
   if (await hasValidCliToken(request)) return true;
@@ -220,6 +213,14 @@ export const __test__ = {
 
 export async function proxy(request) {
   const { pathname } = request.nextUrl;
+
+  // Scoped credentials have exactly one public surface. Reject them before
+  // rewrites, localhost bypasses, or handlers with optional API-key settings
+  // can interpret them as ordinary traffic.
+  const presentedKey = extractApiKey(request);
+  if (presentedKey?.startsWith("aip_sk_") && !pathname.startsWith("/provider/v1/")) {
+    return NextResponse.json({ error: "Scoped access token is not valid for this endpoint" }, { status: 403 });
+  }
 
   // Local-only gate for spawn-capable / host-secret routes.
   if (LOCAL_ONLY_PATHS.some((p) => pathname.startsWith(p))) {
