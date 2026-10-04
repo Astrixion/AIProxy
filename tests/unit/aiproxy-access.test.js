@@ -100,14 +100,25 @@ describe("AIProxy scoped credentials", () => {
 
   it("revokes every credential for a permanently deleted session", async () => {
     const vision = await db.upsertSessionAccessToken({
-      externalSessionId: "session-1",
+      externalSessionId: "session-to-delete",
       slot: "browser-vision",
       name: "browser",
       allowedKeys: ["vision-key"],
     });
 
-    expect(await db.revokeSessionAccessTokens("session-1")).toBe(1);
+    expect(await db.revokeSessionAccessTokens("session-to-delete")).toBe(1);
     expect(await db.resolveAccessToken(vision.token)).toBeNull();
+  });
+
+  it("fences credentials for slots that were not issued before session revocation", async () => {
+    await db.revokeSessionAccessTokens("never-issued-session");
+
+    await expect(db.upsertSessionAccessToken({
+      externalSessionId: "never-issued-session",
+      slot: "browser-vision",
+      name: "late browser credential",
+      allowedKeys: ["vision-key"],
+    })).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it("reconciles orphan sessions without revoking active sessions", async () => {
@@ -188,6 +199,55 @@ describe("AIProxy scoped credentials", () => {
     });
     expect(JSON.stringify(stored)).not.toContain("prompt");
     expect(JSON.stringify(stored)).not.toContain("secret");
+  });
+
+  it("merges cumulative stream usage and requires a terminal success event", async () => {
+    const started = await db.startProviderRequest({
+      externalSessionId: "stream-session",
+      tokenId: "token-id",
+      slot: "primary",
+      virtualKey: "primary-key",
+      provider: "claude",
+      upstreamModel: "claude/test",
+      connectionId: "account-a",
+    });
+    const { observeProviderResponse } = await import("@/lib/aiproxy/requestHistory.js");
+    const upstream = new Response([
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":11,"output_tokens":0}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join(""), { headers: { "Content-Type": "text/event-stream" } });
+
+    await observeProviderResponse(upstream, started.id).text();
+    const [stored] = await db.getProviderRequestsForSession("stream-session");
+    expect(stored).toMatchObject({
+      status: "complete",
+      usage: { input: 11, output: 7, complete: true },
+    });
+  });
+
+  it("marks a cleanly truncated stream incomplete instead of successful", async () => {
+    const started = await db.startProviderRequest({
+      externalSessionId: "truncated-session",
+      tokenId: "token-id",
+      slot: "primary",
+      virtualKey: "primary-key",
+      provider: "claude",
+      upstreamModel: "claude/test",
+      connectionId: "account-a",
+    });
+    const { observeProviderResponse } = await import("@/lib/aiproxy/requestHistory.js");
+    const upstream = new Response(
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n',
+      { headers: { "Content-Type": "text/event-stream" } }
+    );
+
+    await observeProviderResponse(upstream, started.id).text();
+    const [stored] = await db.getProviderRequestsForSession("truncated-session");
+    expect(stored).toMatchObject({
+      status: "incomplete",
+      usage: { input: 5, complete: false },
+    });
   });
 
   it("does not accept scoped credentials as general 9Router API keys", async () => {

@@ -104,50 +104,61 @@ export async function upsertSessionAccessToken({ externalSessionId, slot, name, 
   const now = new Date().toISOString();
   const plaintext = sessionPlaintext(externalSessionId, slot);
   const tokenHash = hashAccessToken(plaintext);
-  const existing = db.get(
-    `SELECT * FROM accessTokens WHERE externalSessionId = ? AND slot = ?`,
-    [externalSessionId, slot]
-  );
-  if (existing) {
-    const existingRecord = rowToAccessToken(existing);
-    if (!existingRecord.isActive) {
+  let record;
+  db.transaction(() => {
+    const revoked = db.get(
+      `SELECT externalSessionId FROM revokedSessions WHERE externalSessionId = ?`,
+      [externalSessionId]
+    );
+    if (revoked) {
       throw new SessionCredentialConflictError(
-        `Credential '${externalSessionId}:${slot}' was revoked and cannot be reissued`
+        `Session '${externalSessionId}' was revoked and cannot receive credentials`
       );
     }
-    const existingKeys = [...existingRecord.allowedKeys].sort();
-    const requestedKeys = [...allowedKeys].sort();
-    if (JSON.stringify(existingKeys) !== JSON.stringify(requestedKeys)) {
-      throw new SessionCredentialConflictError(
-        `Credential '${externalSessionId}:${slot}' already exists with a different scope`
-      );
+
+    const existing = db.get(
+      `SELECT * FROM accessTokens WHERE externalSessionId = ? AND slot = ?`,
+      [externalSessionId, slot]
+    );
+    if (existing) {
+      const existingRecord = rowToAccessToken(existing);
+      if (!existingRecord.isActive) {
+        throw new SessionCredentialConflictError(
+          `Credential '${externalSessionId}:${slot}' was revoked and cannot be reissued`
+        );
+      }
+      const existingKeys = [...existingRecord.allowedKeys].sort();
+      const requestedKeys = [...allowedKeys].sort();
+      if (JSON.stringify(existingKeys) !== JSON.stringify(requestedKeys)) {
+        throw new SessionCredentialConflictError(
+          `Credential '${externalSessionId}:${slot}' already exists with a different scope`
+        );
+      }
+      record = existingRecord;
+      return;
     }
-    return { token: plaintext, record: existingRecord };
-  }
-  const id = uuidv4();
 
-  db.run(
-    `INSERT INTO accessTokens(
-       id, tokenHash, name, kind, externalSessionId, slot, allowedKeys,
-       isActive, createdAt, updatedAt
-     ) VALUES(?, ?, ?, 'session', ?, ?, ?, 1, ?, ?)`,
-    [
-      id,
-      tokenHash,
-      name,
-      externalSessionId,
-      slot,
-      stringifyJson(allowedKeys),
-      now,
-      now,
-    ]
-  );
+    const id = uuidv4();
+    db.run(
+      `INSERT INTO accessTokens(
+         id, tokenHash, name, kind, externalSessionId, slot, allowedKeys,
+         isActive, createdAt, updatedAt
+       ) VALUES(?, ?, ?, 'session', ?, ?, ?, 1, ?, ?)`,
+      [
+        id,
+        tokenHash,
+        name,
+        externalSessionId,
+        slot,
+        stringifyJson(allowedKeys),
+        now,
+        now,
+      ]
+    );
 
-  const row = db.get(
-    `SELECT * FROM accessTokens WHERE externalSessionId = ? AND slot = ?`,
-    [externalSessionId, slot]
-  );
-  return { token: plaintext, record: rowToAccessToken(row) };
+    record = rowToAccessToken(db.get(`SELECT * FROM accessTokens WHERE id = ?`, [id]));
+  });
+  return { token: plaintext, record };
 }
 
 export async function revokeAccessToken(id) {
@@ -163,12 +174,21 @@ export async function revokeAccessToken(id) {
 export async function revokeSessionAccessTokens(externalSessionId) {
   const db = await getAdapter();
   const now = new Date().toISOString();
-  const result = db.run(
-    `UPDATE accessTokens SET isActive = 0, updatedAt = ?
-     WHERE externalSessionId = ? AND isActive = 1`,
-    [now, externalSessionId]
-  );
-  return result?.changes ?? 0;
+  let revoked = 0;
+  db.transaction(() => {
+    db.run(
+      `INSERT INTO revokedSessions(externalSessionId, revokedAt) VALUES(?, ?)
+       ON CONFLICT(externalSessionId) DO NOTHING`,
+      [externalSessionId, now]
+    );
+    const result = db.run(
+      `UPDATE accessTokens SET isActive = 0, updatedAt = ?
+       WHERE externalSessionId = ? AND isActive = 1`,
+      [now, externalSessionId]
+    );
+    revoked = result?.changes ?? 0;
+  });
+  return revoked;
 }
 
 export async function reconcileSessionAccessTokens(retainedSessionIds, snapshotTakenAt) {
@@ -191,6 +211,11 @@ export async function reconcileSessionAccessTokens(retainedSessionIds, snapshotT
   const now = new Date().toISOString();
   db.transaction(() => {
     for (const sessionId of orphans) {
+      db.run(
+        `INSERT INTO revokedSessions(externalSessionId, revokedAt) VALUES(?, ?)
+         ON CONFLICT(externalSessionId) DO NOTHING`,
+        [sessionId, now]
+      );
       db.run(
         `UPDATE accessTokens SET isActive = 0, updatedAt = ?
          WHERE externalSessionId = ? AND isActive = 1`,

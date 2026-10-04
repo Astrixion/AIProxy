@@ -47,6 +47,7 @@ export async function listProviderKeys() {
       members: state.members,
       strategy: state.strategy,
       contextWindow: contextWindowForMembers(state.members),
+      maxTokens: maxTokensForMembers(state.members),
     }));
   return {
     keys,
@@ -64,6 +65,10 @@ export function contextWindowForMembers(members) {
     const slash = member.model.indexOf("/");
     const provider = slash === -1 ? null : member.model.slice(0, slash);
     const model = slash === -1 ? member.model : member.model.slice(slash + 1);
+    if (/^(gpt-5\.[56]|claude-(sonnet|opus)-4[.-]6|claude-opus-5[.-]5|k3$|kimi-k3$|deepseek-v4)/i.test(model)) {
+      return 1000000;
+    }
+    if (/^(grok-build$|grok-4\.6)/i.test(model)) return 500000;
     const value = Number(getCapabilitiesForModel(provider, model)?.contextWindow);
     // 9Router's generic capability fallback is 200K. Misanthropic's contract
     // intentionally advertises an unknown member conservatively as 128K.
@@ -71,14 +76,36 @@ export function contextWindowForMembers(members) {
   }));
 }
 
+export function maxTokensForMembers(members) {
+  if (!members?.length) return 32768;
+  return Math.min(...members.map((member) => {
+    const slash = member.model.indexOf("/");
+    const provider = slash === -1 ? null : member.model.slice(0, slash);
+    const model = slash === -1 ? member.model : member.model.slice(slash + 1);
+    if (/^claude-opus-5[.-]5/i.test(model)) return 128000;
+    const value = Number(getCapabilitiesForModel(provider, model)?.maxOutput);
+    return Number.isFinite(value) ? Math.min(value, 32768) : 32768;
+  }));
+}
+
 export async function getProviderKeyDescriptor(name) {
   if (name === RESERVED_ALL_KEY) {
     const states = (await getProviderKeyStates()).filter((state) => state.name !== RESERVED_ALL_KEY);
     const members = states.flatMap((state) => state.members);
-    return members.length ? { name, members, strategy: "round-robin", contextWindow: contextWindowForMembers(members) } : null;
+    return members.length ? {
+      name,
+      members,
+      strategy: "round-robin",
+      contextWindow: contextWindowForMembers(members),
+      maxTokens: maxTokensForMembers(members),
+    } : null;
   }
   const state = await getProviderKeyState(name);
-  return state ? { ...state, contextWindow: contextWindowForMembers(state.members) } : null;
+  return state ? {
+    ...state,
+    contextWindow: contextWindowForMembers(state.members),
+    maxTokens: maxTokensForMembers(state.members),
+  } : null;
 }
 
 export async function validateProviderKeyInput(name, body) {
@@ -137,6 +164,7 @@ export async function putProviderKey(name, body) {
     members: state.members,
     strategy: state.strategy,
     contextWindow: contextWindowForMembers(state.members),
+    maxTokens: maxTokensForMembers(state.members),
   };
 }
 

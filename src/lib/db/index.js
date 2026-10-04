@@ -97,6 +97,7 @@ export async function exportDb() {
     proxyPools: db.all(`SELECT * FROM proxyPools`).map((r) => ({ ...parseJson(r.data, {}), id: r.id, isActive: r.isActive === 1, testStatus: r.testStatus, createdAt: r.createdAt, updatedAt: r.updatedAt })),
     apiKeys: db.all(`SELECT * FROM apiKeys`).map((r) => ({ id: r.id, key: r.key, name: r.name, machineId: r.machineId, isActive: r.isActive === 1, createdAt: r.createdAt })),
     accessTokens: db.all(`SELECT * FROM accessTokens`).map((r) => ({ ...r, allowedKeys: parseJson(r.allowedKeys, []), isActive: r.isActive === 1 })),
+    revokedSessions: db.all(`SELECT * FROM revokedSessions`),
     combos: db.all(`SELECT * FROM combos`).map((r) => ({ id: r.id, name: r.name, kind: r.kind, models: parseJson(r.models, []), createdAt: r.createdAt, updatedAt: r.updatedAt })),
     providerKeyStates: db.all(`SELECT * FROM providerKeyStates`).map((r) => ({ ...r, members: parseJson(r.members, []), usageCounts: parseJson(r.usageCounts, {}) })),
     modelAliases: {},
@@ -127,6 +128,7 @@ export async function importDb(payload) {
     db.run(`DELETE FROM proxyPools`);
     db.run(`DELETE FROM apiKeys`);
     db.run(`DELETE FROM accessTokens`);
+    db.run(`DELETE FROM revokedSessions`);
     db.run(`DELETE FROM combos`);
     db.run(`DELETE FROM providerKeyStates`);
     db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`);
@@ -176,6 +178,12 @@ export async function importDb(payload) {
           token.createdAt || new Date().toISOString(),
           token.updatedAt || new Date().toISOString(),
         ]
+      );
+    }
+    for (const revoked of payload.revokedSessions || []) {
+      db.run(
+        `INSERT OR REPLACE INTO revokedSessions(externalSessionId, revokedAt) VALUES(?, ?)`,
+        [revoked.externalSessionId, revoked.revokedAt || new Date().toISOString()]
       );
     }
     for (const c of payload.combos || []) {

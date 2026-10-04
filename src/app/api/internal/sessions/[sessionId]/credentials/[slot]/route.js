@@ -47,6 +47,7 @@ export async function PUT(request, { params }) {
         model: canonicalKey,
         token: issued.token,
         contextWindow: descriptor.contextWindow,
+        maxTokens: descriptor.maxTokens,
       },
     });
   } catch (error) {

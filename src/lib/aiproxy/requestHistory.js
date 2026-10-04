@@ -36,53 +36,114 @@ function findUsage(value, depth = 0) {
 
 function inspectJson(text) {
   try {
-    return findUsage(JSON.parse(text));
+    return JSON.parse(text);
   } catch {
     return null;
   }
 }
 
-async function observeBody(stream, requestId, responseStatus, contentType) {
+function mergeUsage(current, observed) {
+  if (!observed) return current;
+  const merged = { ...(current || {}) };
+  for (const field of ["input", "output", "cacheRead", "cacheWrite"]) {
+    if (observed[field] !== null) merged[field] = observed[field];
+  }
+  return merged;
+}
+
+function inspectEvent(raw, state) {
+  if (raw === "[DONE]") {
+    state.terminalSuccess = true;
+    return;
+  }
+  const value = inspectJson(raw);
+  if (!value) return;
+  state.usage = mergeUsage(state.usage, findUsage(value));
+  if (value.type === "message_stop" || value.type === "response.completed") {
+    state.terminalSuccess = true;
+  }
+  if (value.type === "error" || value.type === "response.failed" || value.error) {
+    state.terminalError = true;
+  }
+}
+
+function observeBody(stream, requestId, responseStatus, contentType) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
-  let pending = "";
-  let body = "";
-  let usage = null;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const text = decoder.decode(value, { stream: true });
-      if (contentType.includes("text/event-stream")) {
-        pending += text;
-        const lines = pending.split("\n");
-        pending = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
-          const found = inspectJson(line.slice(5).trim());
-          if (found) usage = found;
-        }
-      } else if (body.length < 2 * 1024 * 1024) {
-        body += text;
-      }
+  const isSse = contentType.includes("text/event-stream");
+  const state = {
+    pending: "",
+    body: "",
+    usage: null,
+    terminalSuccess: false,
+    terminalError: false,
+    finalized: false,
+  };
+
+  function inspectChunk(value, final = false) {
+    const text = decoder.decode(value, { stream: !final }).replace(/\r\n/g, "\n");
+    if (!isSse) {
+      if (state.body.length < 2 * 1024 * 1024) state.body += text;
+      return;
     }
-    if (!contentType.includes("text/event-stream")) usage = inspectJson(body) || usage;
-    await completeProviderRequest(requestId, {
-      status: responseStatus >= 200 && responseStatus < 300 ? "complete" : `http_${responseStatus}`,
-      usage: {
-        input: usage?.input ?? null,
-        output: usage?.output ?? null,
-        cacheRead: usage?.cacheRead ?? null,
-        cacheWrite: usage?.cacheWrite ?? null,
-        complete: true,
-      },
-    });
-  } catch {
-    await completeProviderRequest(requestId, {
-      status: "incomplete",
-      usage: usage ? { ...usage, complete: false } : { complete: false },
-    });
+    state.pending += text;
+    const lines = state.pending.split("\n");
+    state.pending = final ? "" : lines.pop() || "";
+    for (const line of lines) {
+      if (line.startsWith("data:")) inspectEvent(line.slice(5).trim(), state);
+    }
   }
+
+  async function finalize(status) {
+    if (state.finalized) return;
+    state.finalized = true;
+    if (!isSse) state.usage = mergeUsage(state.usage, findUsage(inspectJson(state.body)));
+    const usage = state.usage
+      ? {
+          input: state.usage.input ?? null,
+          output: state.usage.output ?? null,
+          cacheRead: state.usage.cacheRead ?? null,
+          cacheWrite: state.usage.cacheWrite ?? null,
+          complete: status === "complete",
+        }
+      : null;
+    try {
+      await completeProviderRequest(requestId, { status, usage });
+    } catch {
+      // History must never change inference outcome.
+    }
+  }
+
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read();
+        if (!done) {
+          inspectChunk(value);
+          controller.enqueue(value);
+          return;
+        }
+        inspectChunk(undefined, true);
+        const status = responseStatus < 200 || responseStatus >= 300
+          ? `http_${responseStatus}`
+          : isSse
+            ? state.terminalError ? "protocol_error" : state.terminalSuccess ? "complete" : "incomplete"
+            : "complete";
+        await finalize(status);
+        controller.close();
+      } catch (error) {
+        await finalize("incomplete");
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } finally {
+        await finalize("cancelled");
+      }
+    },
+  });
 }
 
 export async function beginProviderRequest({ credential, virtualKey, member }) {
@@ -105,13 +166,12 @@ export function observeProviderResponse(response, requestId) {
     }).catch(() => {});
     return response;
   }
-  const [clientBody, observerBody] = response.body.tee();
-  observeBody(
-    observerBody,
+  const clientBody = observeBody(
+    response.body,
     requestId,
     response.status,
     response.headers.get("content-type") || ""
-  ).catch(() => {});
+  );
   return new Response(clientBody, {
     status: response.status,
     statusText: response.statusText,
