@@ -1,5 +1,6 @@
 import {
   deleteProviderKeyState,
+  getDefaultProviderKey,
   getProviderConnectionById,
   getProviderKeyState,
   getProviderKeyStates,
@@ -51,6 +52,7 @@ export async function listProviderKeys() {
     }));
   return {
     keys,
+    defaultKey: await getDefaultProviderKey(),
     reservedKey: {
       name: RESERVED_ALL_KEY,
       memberCount: keys.reduce((total, key) => total + key.members.length, 0),

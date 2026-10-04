@@ -17,7 +17,7 @@ export {
   getCombos, getComboById, getComboByName,
   createCombo, updateCombo, deleteCombo,
   PROVIDER_KEY_STRATEGIES, getProviderKeyState, getProviderKeyStates, upsertProviderKeyState,
-  deleteProviderKeyState, selectProviderKeyMembers,
+  deleteProviderKeyState, selectProviderKeyMembers, getDefaultProviderKey, setDefaultProviderKey,
   startProviderRequest, completeProviderRequest, getProviderRequestsForSession,
   getModelAliases, setModelAlias, deleteModelAlias,
   getCustomModels, addCustomModel, deleteCustomModel,

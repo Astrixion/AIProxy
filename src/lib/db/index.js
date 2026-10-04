@@ -48,7 +48,7 @@ export {
 // Exact-account provider-key routing state
 export {
   PROVIDER_KEY_STRATEGIES, getProviderKeyState, getProviderKeyStates, upsertProviderKeyState,
-  deleteProviderKeyState, selectProviderKeyMembers,
+  deleteProviderKeyState, selectProviderKeyMembers, getDefaultProviderKey, setDefaultProviderKey,
 } from "./repos/providerKeyStatesRepo.js";
 
 // Content-free provider routing and usage history
@@ -100,6 +100,9 @@ export async function exportDb() {
     revokedSessions: db.all(`SELECT * FROM revokedSessions`),
     combos: db.all(`SELECT * FROM combos`).map((r) => ({ id: r.id, name: r.name, kind: r.kind, models: parseJson(r.models, []), createdAt: r.createdAt, updatedAt: r.updatedAt })),
     providerKeyStates: db.all(`SELECT * FROM providerKeyStates`).map((r) => ({ ...r, members: parseJson(r.members, []), usageCounts: parseJson(r.usageCounts, {}) })),
+    aiproxy: {
+      defaultProviderKey: db.get(`SELECT value FROM kv WHERE scope = 'aiproxy' AND key = 'defaultProviderKey'`)?.value || null,
+    },
     modelAliases: {},
     customModels: [],
     mitmAlias: {},
@@ -131,6 +134,7 @@ export async function importDb(payload) {
     db.run(`DELETE FROM revokedSessions`);
     db.run(`DELETE FROM combos`);
     db.run(`DELETE FROM providerKeyStates`);
+    db.run(`DELETE FROM kv WHERE scope = 'aiproxy'`);
     db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`);
 
     // Settings
@@ -203,6 +207,12 @@ export async function importDb(payload) {
           state.createdAt || new Date().toISOString(),
           state.updatedAt || new Date().toISOString(),
         ]
+      );
+    }
+    if (payload.aiproxy?.defaultProviderKey) {
+      db.run(
+        `INSERT OR REPLACE INTO kv(scope, key, value) VALUES('aiproxy', 'defaultProviderKey', ?)`,
+        [payload.aiproxy.defaultProviderKey]
       );
     }
     for (const [a, m] of Object.entries(payload.modelAliases || {})) {

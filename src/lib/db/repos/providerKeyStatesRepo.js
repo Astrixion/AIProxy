@@ -9,6 +9,9 @@ export const PROVIDER_KEY_STRATEGIES = [
   "least-used",
 ];
 
+const CONFIG_SCOPE = "aiproxy";
+const DEFAULT_KEY = "defaultProviderKey";
+
 function rowToState(row) {
   if (!row) return null;
   return {
@@ -30,6 +33,28 @@ export async function getProviderKeyState(name) {
 export async function getProviderKeyStates() {
   const db = await getAdapter();
   return db.all(`SELECT * FROM providerKeyStates ORDER BY createdAt ASC`).map(rowToState);
+}
+
+export async function getDefaultProviderKey() {
+  const db = await getAdapter();
+  return db.get(`SELECT value FROM kv WHERE scope = ? AND key = ?`, [CONFIG_SCOPE, DEFAULT_KEY])?.value || null;
+}
+
+export async function setDefaultProviderKey(name) {
+  const db = await getAdapter();
+  const normalized = typeof name === "string" ? name.trim() : "";
+  if (!normalized) {
+    db.run(`DELETE FROM kv WHERE scope = ? AND key = ?`, [CONFIG_SCOPE, DEFAULT_KEY]);
+    return null;
+  }
+  const exists = db.get(`SELECT name FROM providerKeyStates WHERE name = ?`, [normalized]);
+  if (!exists) throw new Error(`Unknown provider key '${normalized}'`);
+  db.run(
+    `INSERT INTO kv(scope, key, value) VALUES(?, ?, ?)
+     ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`,
+    [CONFIG_SCOPE, DEFAULT_KEY, normalized]
+  );
+  return normalized;
 }
 
 export async function upsertProviderKeyState(name, strategy = "fill-first", members = null) {
@@ -54,7 +79,11 @@ export async function upsertProviderKeyState(name, strategy = "fill-first", memb
 
 export async function deleteProviderKeyState(name) {
   const db = await getAdapter();
-  const result = db.run(`DELETE FROM providerKeyStates WHERE name = ?`, [name]);
+  let result;
+  db.transaction(() => {
+    result = db.run(`DELETE FROM providerKeyStates WHERE name = ?`, [name]);
+    db.run(`DELETE FROM kv WHERE scope = ? AND key = ? AND value = ?`, [CONFIG_SCOPE, DEFAULT_KEY, name]);
+  });
   return (result?.changes ?? 0) > 0;
 }
 
