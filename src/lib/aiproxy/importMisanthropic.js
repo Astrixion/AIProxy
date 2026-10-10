@@ -160,3 +160,80 @@ export async function importMisanthropic(payload) {
 
   return result;
 }
+
+// Repairs an incomplete import without replacing live accounts, keys, tokens or tombstones.
+// The control-plane operator supplies a fresh, complete retained-session snapshot. This is
+// deliberately separate from the empty-database importer and never restores manual access.
+export async function repairMisanthropicSessionTokens(payload) {
+  if (!Array.isArray(payload?.tokens) || !Array.isArray(payload?.retainedSessionIds)
+      || typeof payload.apply !== "boolean") {
+    throw new Error("tokens, retainedSessionIds, and boolean apply are required");
+  }
+  const now = new Date();
+  const snapshot = Date.parse(payload.snapshotTakenAt);
+  if (!Number.isFinite(snapshot) || snapshot > now.getTime()
+      || now.getTime() - snapshot > 300000) {
+    throw new Error("A retained-session snapshot from the last five minutes is required");
+  }
+  const retained = new Set(payload.retainedSessionIds.map((id) => required(id, "retained session id")));
+  const db = await getAdapter();
+  let result;
+  db.transaction(() => {
+    if (!db.get(`SELECT value FROM kv WHERE scope = 'aiproxy' AND key = 'misanthropicImportedAt'`)) {
+      throw new Error("An existing Misanthropic import is required before repair");
+    }
+    const knownKeys = new Set(db.all(`SELECT name FROM providerKeyStates`).map((row) => row.name));
+    const seen = new Set();
+    let existing = 0;
+    const missing = [];
+    for (const token of payload.tokens) {
+      const sessionId = required(token.SessionId, "token.SessionId");
+      if (!retained.has(sessionId)) throw new Error("Token session is not retained by Misanthropic");
+      if (db.get(`SELECT externalSessionId FROM revokedSessions WHERE externalSessionId = ?`, [sessionId])) {
+        throw new Error("A revoked session cannot be restored");
+      }
+      const hash = required(token.TokenHash, "token.TokenHash").toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(hash) || seen.has(hash)) {
+        throw new Error("Each token must have a unique SHA-256 hash");
+      }
+      seen.add(hash);
+      const issuedAt = Date.parse(token.IssuedAt);
+      if (!Number.isFinite(issuedAt) || issuedAt > snapshot) {
+        throw new Error("Token issuance must predate the retained-session snapshot");
+      }
+      const allowed = token.AllowedKeys;
+      if (!Array.isArray(allowed) || allowed.length === 0 || new Set(allowed).size !== allowed.length
+          || allowed.some((key) => typeof key !== "string" || (!knownKeys.has(key) && key !== "all"))) {
+        throw new Error("Token scope must contain distinct existing provider keys or the reserved all pool");
+      }
+      const current = db.get(`SELECT * FROM accessTokens WHERE tokenHash = ?`, [hash]);
+      if (current) {
+        if (!current.isActive || current.kind !== "session" || current.externalSessionId !== sessionId
+            || JSON.stringify(JSON.parse(current.allowedKeys).sort()) !== JSON.stringify([...allowed].sort())) {
+          throw new Error("Existing token state conflicts with the source; refusing to change access");
+        }
+        existing++;
+      } else {
+        missing.push({ sessionId, hash, allowed, issuedAt: new Date(issuedAt).toISOString(), name: token.Role || "misanthropic-import" });
+      }
+    }
+
+    // Validate the entire batch before inserting any row, and preserve legacy slots already in use.
+    if (payload.apply) {
+      for (const token of missing) {
+        const slots = new Set(db.all(`SELECT slot FROM accessTokens WHERE externalSessionId = ?`, [token.sessionId])
+          .map((row) => row.slot));
+        let index = 1;
+        while (slots.has(`legacy-${index}`)) index++;
+        db.run(
+          `INSERT INTO accessTokens(id, tokenHash, name, kind, externalSessionId, slot, allowedKeys,
+             isActive, createdAt, updatedAt) VALUES(?, ?, ?, 'session', ?, ?, ?, 1, ?, ?)`,
+          [randomUUID(), token.hash, token.name, token.sessionId, `legacy-${index}`,
+            stringifyJson(token.allowed), token.issuedAt, now.toISOString()]
+        );
+      }
+    }
+    result = { applied: payload.apply, existing, missing: missing.length, inserted: payload.apply ? missing.length : 0 };
+  });
+  return result;
+}

@@ -1,4 +1,4 @@
-import { importMisanthropic } from "@/lib/aiproxy/importMisanthropic.js";
+import { importMisanthropic, repairMisanthropicSessionTokens } from "@/lib/aiproxy/importMisanthropic.js";
 import { requireInternalApi } from "@/lib/auth/internalApi.js";
 
 export async function POST(request) {
@@ -6,6 +6,16 @@ export async function POST(request) {
   if (denied) return denied;
   try {
     return Response.json(await importMisanthropic(await request.json()), { status: 201 });
+  } catch (error) {
+    return Response.json({ error: error.message }, { status: 409 });
+  }
+}
+
+export async function PATCH(request) {
+  const denied = requireInternalApi(request);
+  if (denied) return denied;
+  try {
+    return Response.json(await repairMisanthropicSessionTokens(await request.json()));
   } catch (error) {
     return Response.json({ error: error.message }, { status: 409 });
   }

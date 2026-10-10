@@ -1,3 +1,10 @@
+# AIProxy extension (unreleased)
+
+- Add a control-authenticated preview/apply repair for missing retained Misanthropic session
+  credential hashes. Preserve existing bindings, scopes, legacy slots and revocation tombstones;
+  reject manual credentials and stale lifecycle snapshots. Production repair requires separate
+  operator approval and does not rerun the initial provider-state import.
+
 # v0.5.91 (2026-09-26)
 
 ## Features

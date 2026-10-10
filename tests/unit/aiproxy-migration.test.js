@@ -10,6 +10,8 @@ let tempDir;
 let db;
 let adapter;
 let importMisanthropic;
+let repairRoute;
+const originalControlToken = process.env.AIPROXY_CONTROL_TOKEN;
 
 function tokenHash(token) {
   return createHash("sha256").update(token, "utf8").digest("hex");
@@ -88,6 +90,8 @@ beforeAll(async () => {
   db = await import("@/lib/db/index.js");
   ({ getAdapter: adapter } = await import("@/lib/db/driver.js"));
   ({ importMisanthropic } = await import("@/lib/aiproxy/importMisanthropic.js"));
+  ({ PATCH: repairRoute } = await import("@/app/api/internal/migrations/misanthropic/route.js"));
+  process.env.AIPROXY_CONTROL_TOKEN = "test-control-token";
   await db.initDb();
   adapter = await adapter();
 });
@@ -108,6 +112,8 @@ afterAll(() => {
   else process.env.DATA_DIR = originalDataDir;
   if (originalSessionSecret === undefined) delete process.env.AIPROXY_SESSION_TOKEN_SECRET;
   else process.env.AIPROXY_SESSION_TOKEN_SECRET = originalSessionSecret;
+  if (originalControlToken === undefined) delete process.env.AIPROXY_CONTROL_TOKEN;
+  else process.env.AIPROXY_CONTROL_TOKEN = originalControlToken;
 });
 
 describe("AIProxy default provider key", () => {
@@ -182,5 +188,83 @@ describe("Misanthropic provider-state import", () => {
     await expect(importMisanthropic(migrationPayload().payload))
       .rejects.toThrow("AIProxy provider state is not empty");
     expect(await db.getProviderKeyState("already-here")).not.toBeNull();
+  });
+});
+
+function repairRequest(tokens, options = {}, authenticated = true) {
+  return repairRoute(new Request("http://localhost/api/internal/migrations/misanthropic", {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authenticated ? { Authorization: "Bearer test-control-token" } : {}),
+    },
+    body: JSON.stringify({
+      tokens,
+      retainedSessionIds: ["session-cutover"],
+      snapshotTakenAt: new Date().toISOString(),
+      apply: true,
+      ...options,
+    }),
+  }));
+}
+
+describe("Incomplete session-credential import repair", () => {
+  it("previews without writes and restores only missing hashes idempotently, without rotating any credential", async () => {
+    const { payload, legacySessionToken, manualToken } = migrationPayload();
+    await importMisanthropic(payload);
+    const before = await db.exportDb();
+    const missingSecret = "retained-browser-credential";
+    const missing = { ...payload.tokens[0], TokenHash: tokenHash(missingSecret), AllowedKeys: ["static-key"] };
+    const tokens = [payload.tokens[0], missing];
+
+    const preview = await repairRequest(tokens, { apply: false });
+    expect(await preview.json()).toEqual({ applied: false, existing: 1, missing: 1, inserted: 0 });
+    expect(await db.resolveAccessToken(missingSecret)).toBeNull();
+    const applied = await repairRequest(tokens);
+    expect(await applied.json()).toEqual({ applied: true, existing: 1, missing: 1, inserted: 1 });
+    expect(await db.resolveAccessToken(missingSecret)).toMatchObject({
+      kind: "session", externalSessionId: "session-cutover", slot: "legacy-2",
+      allowedKeys: ["static-key"], createdAt: missing.IssuedAt,
+    });
+    expect(await db.resolveAccessToken(legacySessionToken)).toMatchObject({ slot: "legacy-1", allowedKeys: ["build-key"] });
+    expect(await db.resolveAccessToken(manualToken)).toMatchObject({ kind: "manual", allowedKeys: ["static-key"] });
+    const repeated = await repairRequest(tokens);
+    expect(await repeated.json()).toEqual({ applied: true, existing: 2, missing: 0, inserted: 0 });
+    const after = await db.exportDb();
+    expect(after.providerConnections).toEqual(before.providerConnections);
+    expect(after.providerKeyStates).toEqual(before.providerKeyStates);
+    expect(after.aiproxy).toEqual(before.aiproxy);
+    await db.revokeSessionAccessTokens("session-cutover");
+    expect(await db.resolveAccessToken(missingSecret)).toBeNull();
+    expect((await repairRequest(tokens)).status).toBe(409);
+    expect(await db.resolveAccessToken(missingSecret)).toBeNull();
+  });
+
+  it.each(["manual", "unretained", "conflict", "stale", "future", "unknown-key", "inactive"])(
+    "rejects %s access atomically even after a valid missing credential in the batch", async (failure) => {
+      const { payload } = migrationPayload();
+      await importMisanthropic(payload);
+      const missingSecret = "must-not-restore-partial-batch";
+      const missing = { ...payload.tokens[0], TokenHash: tokenHash(missingSecret) };
+      const invalid = { ...payload.tokens[0] };
+      const options = {};
+      if (failure === "manual") invalid.SessionId = null;
+      if (failure === "unretained") invalid.SessionId = "not-retained";
+      if (failure === "conflict") invalid.AllowedKeys = ["static-key"];
+      if (failure === "stale") options.snapshotTakenAt = new Date(Date.now() - 301000).toISOString();
+      if (failure === "future") invalid.IssuedAt = new Date(Date.now() + 60000).toISOString();
+      if (failure === "unknown-key") invalid.AllowedKeys = ["missing-key"];
+      if (failure === "inactive") adapter.run(`UPDATE accessTokens SET isActive = 0 WHERE kind = 'session'`);
+      const response = await repairRequest([missing, invalid], options);
+      expect(response.status).toBe(409);
+      expect(await db.resolveAccessToken(missingSecret)).toBeNull();
+    }
+  );
+
+  it("requires the control credential and an existing import", async () => {
+    const { payload } = migrationPayload();
+    expect((await repairRequest([payload.tokens[0]], {}, false)).status).toBe(401);
+    expect((await repairRequest([payload.tokens[0]])).status).toBe(409);
+    expect(await db.getAccessTokens()).toEqual([]);
   });
 });
