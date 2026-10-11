@@ -344,6 +344,29 @@ describe("AIProxy dashboard management", () => {
     expect((await read("?kind=manual"))[0].id).toBe(manual.id);
     expect(await db.getDefaultProviderKey()).toBeNull();
   });
+
+  it("discovers the reserved all pool for lifecycle callers without making it editable", async () => {
+    const original = process.env.AIPROXY_CONTROL_TOKEN;
+    process.env.AIPROXY_CONTROL_TOKEN = "synthetic-control-token";
+    try {
+      const internal = await import("@/app/api/internal/provider-keys/route.js");
+      expect((await internal.GET(request())).status).toBe(401);
+      const response = await internal.GET(request(null, "", { authorization: "Bearer synthetic-control-token" }));
+      const catalog = await response.json();
+      expect(catalog.keys.find(key => key.name === "all")).toMatchObject({
+        strategy: "round-robin", contextWindow: 128000, maxTokens: 32768,
+        members: [
+          { model: "claude/test", connectionId: "account-a" },
+          { model: "claude/vision", connectionId: "account-b" },
+        ],
+      });
+      const dashboard = await (await route.GET(request())).json();
+      expect(dashboard.keys.some(key => key.name === "all")).toBe(false);
+    } finally {
+      if (original === undefined) delete process.env.AIPROXY_CONTROL_TOKEN;
+      else process.env.AIPROXY_CONTROL_TOKEN = original;
+    }
+  });
 });
 
 describe("AIProxy Anthropic facade", () => {
