@@ -218,10 +218,10 @@ describe("Incomplete session-credential import repair", () => {
     const tokens = [payload.tokens[0], missing];
 
     const preview = await repairRequest(tokens, { apply: false });
-    expect(await preview.json()).toEqual({ applied: false, existing: 1, missing: 1, inserted: 0 });
+    expect(await preview.json()).toEqual({ applied: false, existing: 1, missing: 1, inserted: 0, unresolvedKeys: [] });
     expect(await db.resolveAccessToken(missingSecret)).toBeNull();
     const applied = await repairRequest(tokens);
-    expect(await applied.json()).toEqual({ applied: true, existing: 1, missing: 1, inserted: 1 });
+    expect(await applied.json()).toEqual({ applied: true, existing: 1, missing: 1, inserted: 1, unresolvedKeys: [] });
     expect(await db.resolveAccessToken(missingSecret)).toMatchObject({
       kind: "session", externalSessionId: "session-cutover", slot: "legacy-2",
       allowedKeys: ["static-key"], createdAt: missing.IssuedAt,
@@ -229,7 +229,7 @@ describe("Incomplete session-credential import repair", () => {
     expect(await db.resolveAccessToken(legacySessionToken)).toMatchObject({ slot: "legacy-1", allowedKeys: ["build-key"] });
     expect(await db.resolveAccessToken(manualToken)).toMatchObject({ kind: "manual", allowedKeys: ["static-key"] });
     const repeated = await repairRequest(tokens);
-    expect(await repeated.json()).toEqual({ applied: true, existing: 2, missing: 0, inserted: 0 });
+    expect(await repeated.json()).toEqual({ applied: true, existing: 2, missing: 0, inserted: 0, unresolvedKeys: [] });
     const after = await db.exportDb();
     expect(after.providerConnections).toEqual(before.providerConnections);
     expect(after.providerKeyStates).toEqual(before.providerKeyStates);
@@ -240,7 +240,30 @@ describe("Incomplete session-credential import repair", () => {
     expect(await db.resolveAccessToken(missingSecret)).toBeNull();
   });
 
-  it.each(["manual", "unretained", "conflict", "stale", "future", "unknown-key", "inactive"])(
+  it("preserves removed historical scopes without granting a replacement or restoring routing", async () => {
+    const { payload } = migrationPayload();
+    await importMisanthropic(payload);
+    const secret = "retained-removed-model-credential";
+    const missing = { ...payload.tokens[0], TokenHash: tokenHash(secret), AllowedKeys: ["retired-key"] };
+    const preview = await repairRequest([missing], { apply: false });
+    expect(await preview.json()).toMatchObject({ inserted: 0, unresolvedKeys: ["retired-key"] });
+    const applied = await repairRequest([missing]);
+    expect(await applied.json()).toMatchObject({ inserted: 1, unresolvedKeys: ["retired-key"] });
+    expect(await db.resolveAccessToken(secret)).toMatchObject({ allowedKeys: ["retired-key"], slot: "legacy-2" });
+    expect(await db.getProviderKeyState("retired-key")).toBeNull();
+    const { validateAllowedKeys } = await import("@/lib/aiproxy/accessControl.js");
+    await expect(validateAllowedKeys(["retired-key"])).rejects.toThrow("Unknown provider key");
+    const { POST } = await import("@/app/provider/v1/messages/route.js");
+    for (const [model, status] of [["retired-key", 404], ["build-key", 403]]) {
+      const result = await POST(new Request("http://localhost/provider/v1/messages", {
+        method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+        body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: "user", content: "hello" }] }),
+      }));
+      expect(result.status).toBe(status);
+    }
+  }, 20000);
+
+  it.each(["manual", "unretained", "conflict", "stale", "future", "wildcard", "inactive"])(
     "rejects %s access atomically even after a valid missing credential in the batch", async (failure) => {
       const { payload } = migrationPayload();
       await importMisanthropic(payload);
@@ -253,7 +276,7 @@ describe("Incomplete session-credential import repair", () => {
       if (failure === "conflict") invalid.AllowedKeys = ["static-key"];
       if (failure === "stale") options.snapshotTakenAt = new Date(Date.now() - 301000).toISOString();
       if (failure === "future") invalid.IssuedAt = new Date(Date.now() + 60000).toISOString();
-      if (failure === "unknown-key") invalid.AllowedKeys = ["missing-key"];
+      if (failure === "wildcard") invalid.AllowedKeys = ["*"];
       if (failure === "inactive") adapter.run(`UPDATE accessTokens SET isActive = 0 WHERE kind = 'session'`);
       const response = await repairRequest([missing, invalid], options);
       expect(response.status).toBe(409);

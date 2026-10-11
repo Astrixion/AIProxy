@@ -183,6 +183,7 @@ export async function repairMisanthropicSessionTokens(payload) {
       throw new Error("An existing Misanthropic import is required before repair");
     }
     const knownKeys = new Set(db.all(`SELECT name FROM providerKeyStates`).map((row) => row.name));
+    const unresolvedKeys = new Set();
     const seen = new Set();
     let existing = 0;
     const missing = [];
@@ -203,9 +204,12 @@ export async function repairMisanthropicSessionTokens(payload) {
       }
       const allowed = token.AllowedKeys;
       if (!Array.isArray(allowed) || allowed.length === 0 || new Set(allowed).size !== allowed.length
-          || allowed.some((key) => typeof key !== "string" || (!knownKeys.has(key) && key !== "all"))) {
-        throw new Error("Token scope must contain distinct existing provider keys or the reserved all pool");
+          || allowed.some((key) => typeof key !== "string" || !/^[a-zA-Z0-9_.\-]+(?:\/[a-zA-Z0-9_.\-]+)*$/.test(key))) {
+        throw new Error("Token scope must contain distinct literal provider key names");
       }
+      // A historical key may have been removed before the original import. Preserve its exact
+      // scope, never map it to a replacement. Inference still returns 404 for an absent key.
+      for (const key of allowed) if (!knownKeys.has(key) && key !== "all") unresolvedKeys.add(key);
       const current = db.get(`SELECT * FROM accessTokens WHERE tokenHash = ?`, [hash]);
       if (current) {
         if (!current.isActive || current.kind !== "session" || current.externalSessionId !== sessionId
@@ -233,7 +237,8 @@ export async function repairMisanthropicSessionTokens(payload) {
         );
       }
     }
-    result = { applied: payload.apply, existing, missing: missing.length, inserted: payload.apply ? missing.length : 0 };
+    result = { applied: payload.apply, existing, missing: missing.length,
+      inserted: payload.apply ? missing.length : 0, unresolvedKeys: [...unresolvedKeys].sort() };
   });
   return result;
 }
