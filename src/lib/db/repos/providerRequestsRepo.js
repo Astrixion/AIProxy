@@ -60,13 +60,21 @@ export async function completeProviderRequest(id, { status, usage = null }) {
 }
 
 export async function getProviderRequestsForSession(externalSessionId, limit = 100) {
+  return getProviderRequests({ externalSessionId, limit });
+}
+
+export async function getProviderRequests({ externalSessionId, kind, limit = 100 } = {}) {
   const db = await getAdapter();
-  const boundedLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
+  const boundedLimit = Math.max(1, Math.min(Math.trunc(Number(limit)) || 100, 500));
+  const hasSession = externalSessionId !== undefined && externalSessionId !== null;
+  const where = hasSession ? "WHERE externalSessionId = ?"
+    : kind === "manual" ? "WHERE externalSessionId IS NULL"
+      : kind === "session" ? "WHERE externalSessionId IS NOT NULL" : "";
   return db.all(
     `SELECT * FROM providerRequests
-     WHERE externalSessionId = ?
+     ${where}
      ORDER BY startedAt DESC
      LIMIT ?`,
-    [externalSessionId, boundedLimit]
+    hasSession ? [externalSessionId, boundedLimit] : [boundedLimit]
   ).map(rowToRequest);
 }

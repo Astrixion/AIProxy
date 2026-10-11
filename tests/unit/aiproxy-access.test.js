@@ -257,6 +257,95 @@ describe("AIProxy scoped credentials", () => {
   });
 });
 
+describe("AIProxy dashboard management", () => {
+  let route;
+  let NextRequest;
+  let cookie;
+  let account;
+
+  beforeAll(async () => {
+    route = await import("@/app/api/provider-facade/route.js");
+    ({ NextRequest } = await import("next/server"));
+    const { createDashboardAuthToken } = await import("@/lib/auth/dashboardSession.js");
+    cookie = `auth_token=${await createDashboardAuthToken()}`;
+    account = await db.createProviderConnection({
+      provider: "claude", authType: "apikey", name: "Dashboard account",
+      apiKey: "never-expose-account-secret", refreshToken: "never-expose-refresh-secret",
+    });
+  });
+
+  function request(body, query = "", headers = {}) {
+    return new NextRequest(`http://localhost/api/provider-facade${query}`, {
+      method: body ? "POST" : "GET",
+      headers: { cookie, origin: "http://localhost", "content-type": "application/json", ...headers },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  }
+
+  it("requires dashboard login even without requireLogin and rejects cross-origin mutation", async () => {
+    await db.updateSettings({ requireLogin: false });
+    const scoped = await db.createManualAccessToken("not-an-admin", ["primary-key"]);
+    expect((await route.GET(request(null, "", { cookie: "", authorization: `Bearer ${scoped.token}` }))).status).toBe(401);
+    expect((await route.POST(request({ action: "setDefault", name: "primary-key" }, "", { origin: "https://attacker.example" }))).status).toBe(403);
+    expect((await route.POST(request({ action: "setDefault", name: "primary-key" }, "", { origin: "" }))).status).toBe(403);
+    expect((await route.POST(request({ action: "setDefault", name: "primary-key" }, "", {
+      host: "127.0.0.1:20128", origin: "http://127.0.0.1:20128",
+    }))).status).toBe(200);
+    expect((await route.POST(request({ action: "setDefault", name: "primary-key" }, "", {
+      host: "127.0.0.1:20128", origin: "http://attacker.example", "x-forwarded-host": "attacker.example",
+    }))).status).toBe(403);
+  });
+
+  it("edits exact-account slash-named keys and default without changing their identity", async () => {
+    const body = { action: "saveKey", name: "anthropic/demo", strategy: "fill-first",
+      members: [{ connectionId: account.id, model: "claude/demo" }] };
+    expect((await route.POST(request(body))).status).toBe(200);
+    const edited = await route.POST(request({ ...body, strategy: "least-used" }));
+    expect(await edited.json()).toMatchObject({ name: "anthropic/demo", strategy: "least-used", members: body.members });
+    const invalid = await route.POST(request({ ...body, members: [{ connectionId: account.id, model: "openai/gpt-4o" }] }));
+    expect(invalid.status).toBe(400);
+    const defaults = await route.POST(request({ action: "setDefault", name: body.name }));
+    expect(await defaults.json()).toEqual({ defaultKey: body.name });
+  });
+
+  it("shows secrets only on issue, preserves scopes, and revokes subsequent access", async () => {
+    const created = await route.POST(request({ action: "createToken", name: "manual dashboard client", allowedKeys: ["primary-key", "vision-key"] }));
+    expect(created.status).toBe(201);
+    const issued = await created.json();
+    expect(await db.resolveAccessToken(issued.token)).toMatchObject({ allowedKeys: ["primary-key", "vision-key"] });
+    const response = await route.GET(request());
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const listing = await response.json();
+    expect(listing.tokens.find((token) => token.id === issued.id)).toMatchObject({ name: "manual dashboard client", isActive: true });
+    expect(JSON.stringify(listing)).not.toContain(issued.token);
+    expect(JSON.stringify(listing)).not.toContain("tokenHash");
+    expect(JSON.stringify(listing)).not.toContain("never-expose");
+    const invalid = await route.POST(request({ action: "createToken", name: "wildcard", allowedKeys: ["*"] }));
+    expect(invalid.status).toBe(400);
+    expect((await route.POST(request({ action: "revokeToken", id: issued.id }))).status).toBe(200);
+    expect(await db.resolveAccessToken(issued.token)).toBeNull();
+    const after = await (await route.GET(request())).json();
+    expect(after.tokens.find((token) => token.id === issued.id).isActive).toBe(false);
+  });
+
+  it("separates manual and session history, fails closed for empty session, and retains history on key deletion", async () => {
+    const manual = await db.startProviderRequest({ virtualKey: "anthropic/demo", provider: "claude",
+      upstreamModel: "claude/demo", connectionId: account.id });
+    const read = async (query) => (await (await route.GET(request(null, query))).json()).requests;
+    expect((await read("?kind=manual")).map((row) => row.id)).toEqual([manual.id]);
+    const sessions = await read("?kind=session");
+    expect(sessions.length).toBeGreaterThan(0);
+    expect(sessions.every((row) => row.externalSessionId !== null)).toBe(true);
+    expect((await read("?sessionId=trace-session")).map((row) => row.externalSessionId)).toEqual(["trace-session"]);
+    expect(await read("?sessionId=")).toEqual([]);
+    expect(await db.getProviderRequestsForSession("")).toEqual([]);
+    expect((await read("?limit=1")).length).toBe(1);
+    expect((await route.POST(request({ action: "deleteKey", name: "anthropic/demo" }))).status).toBe(200);
+    expect((await read("?kind=manual"))[0].id).toBe(manual.id);
+    expect(await db.getDefaultProviderKey()).toBeNull();
+  });
+});
+
 describe("AIProxy Anthropic facade", () => {
   it("rejects malformed Messages requests before routing", async () => {
     const { validateMessagesRequest } = await import("@/lib/aiproxy/anthropicFacade.js");

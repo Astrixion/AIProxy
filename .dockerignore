@@ -17,6 +17,7 @@ coverage
 # Runtime data and logs
 data
 logs
+.amp/in
 
 # Local env files (inject at runtime via --env-file or -e)
 .env

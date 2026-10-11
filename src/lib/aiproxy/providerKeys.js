@@ -13,7 +13,7 @@ import { getModelInfo } from "@/sse/services/model.js";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { RESERVED_ALL_KEY } from "./accessControl.js";
 
-const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
+const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+(?:\/[a-zA-Z0-9_.\-]+)*$/;
 
 export function normalizeProviderKeyMember(member) {
   if (typeof member === "string") {
@@ -111,8 +111,8 @@ export async function getProviderKeyDescriptor(name) {
 }
 
 export async function validateProviderKeyInput(name, body) {
-  if (!name || !VALID_NAME_REGEX.test(name)) {
-    throw new Error("Provider key name can only contain letters, numbers, -, _ and .");
+  if (typeof name !== "string" || !VALID_NAME_REGEX.test(name)) {
+    throw new Error("Provider key name must contain letters, numbers, -, _ or ., optionally separated by /");
   }
   if (name === RESERVED_ALL_KEY) {
     throw new Error(`'${RESERVED_ALL_KEY}' is reserved`);
