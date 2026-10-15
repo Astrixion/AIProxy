@@ -1,5 +1,8 @@
 # AIProxy extension (unreleased)
 
+- Restore request-mapped tool names in same-format streaming responses, including Claude
+  OAuth passthrough. Preserve legitimate `_ide` names and existing SSE framing; previously
+  contaminated session history is not rewritten.
 - Add a control-authenticated preview/apply repair for missing retained Misanthropic session
   credential hashes. Preserve existing bindings, scopes, legacy slots and revocation tombstones;
   reject manual credentials and stale lifecycle snapshots. Production repair requires separate
