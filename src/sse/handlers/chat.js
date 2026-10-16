@@ -28,6 +28,7 @@ import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { credentialAllowsKey, resolveScopedCredential } from "@/lib/aiproxy/accessControl.js";
 import { getExactProviderKeyMembers } from "@/lib/aiproxy/providerKeys.js";
 import { beginProviderRequest, observeProviderResponse } from "@/lib/aiproxy/requestHistory.js";
+import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 
 /**
  * Handle chat completion request
@@ -104,6 +105,13 @@ export async function handleChat(request, clientRawRequest = null, options = {})
   // record id is enough for attribution and cannot be used to make requests.
   const usageApiKey = scopedCredential ? `access:${scopedCredential.id}` : apiKey;
 
+  // Per-key access control: a restricted key may call only its listed combos and
+  // models. Checked once on the requested target, before bypass, combo expansion
+  // and any credential lookup; an allowed combo grants the members it routes to.
+  const keyAccess = await getKeyAccessContext(request);
+  const keyAccessDenied = await enforceKeyAccess(keyAccess, modelStr);
+  if (keyAccessDenied) return keyAccessDenied;
+
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
@@ -138,9 +146,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    const augmentedModels = scopedCredential
-      ? comboModels
-      : augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
+    const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings), comboModels);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
     if (comboStrategy === "fusion") {
@@ -181,7 +187,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
 
   // Single model request — may still switch to a capacity-adapter model if the
   // target lacks a capability the request needs (e.g. no vision, request has an image).
-  const soloAugmented = augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings);
+  const soloAugmented = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings), [modelStr]);
   if (soloAugmented.length > 1) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
@@ -198,7 +204,10 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, usageApiKey);
+  return handleSingleModelChat(
+    body, modelStr, clientRawRequest, request, usageApiKey, null, true,
+    contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null
+  );
 }
 
 async function handleExactProviderKeyChat({
@@ -243,7 +252,8 @@ async function handleSingleModelChat(
   request = null,
   apiKey = null,
   preferredConnectionId = null,
-  allowCapacityAdapters = true
+  allowCapacityAdapters = true,
+  requestedModel = null
 ) {
   const modelInfo = await getModelInfo(modelStr);
 
@@ -257,8 +267,11 @@ async function handleSingleModelChat(
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       const requiredCapabilities = detectRequiredCapabilities(body);
+      // Nested combo (a combo member that is itself a combo): the access decision
+      // was made on the outer target; only drop adapter models the key may not call.
+      const keyAccess = await getKeyAccessContext(request);
       const augmentedModels = allowCapacityAdapters
-        ? augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings)
+        ? await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings), comboModels)
         : comboModels;
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
@@ -335,7 +348,7 @@ async function handleSingleModelChat(
       provider,
       excludeConnectionIds,
       model,
-      { preferredConnectionId }
+      { preferredConnectionId, requestedModel: requestedModel || model }
     );
 
     // All accounts unavailable
@@ -404,6 +417,8 @@ async function handleSingleModelChat(
       pxpipeTransform: !scoped && chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
+      // Per-provider user overrides (custom headers / connect timeout) from settings
+      providerOverrides: (chatSettings.providerOverrides || {})[provider] || null,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {
