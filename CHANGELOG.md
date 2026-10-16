@@ -2,6 +2,9 @@
 
 - Merge 9Router v0.5.104 while retaining scoped credentials, exact-account routing,
   and metadata-only request history. Advance the combined SQLite schema to version 5.
+- Reject upstream's automatic insecure-TLS retry, enforce strict proxy policy before
+  DNS bypass and Cursor relay/direct HTTP/2, redact GLM OAuth bootstrap secrets from
+  provider responses, and keep global header overrides off scoped-account requests.
 - Restore request-mapped tool names in same-format streaming responses, including Claude
   OAuth passthrough. Preserve legitimate `_ide` names and existing SSE framing; previously
   contaminated session history is not rewritten.

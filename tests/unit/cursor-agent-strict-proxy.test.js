@@ -104,15 +104,15 @@ describe("Cursor AgentService strict-proxy policy guard", () => {
     expect(connect).toHaveBeenCalledTimes(1);
   });
 
-  it("a vercel-style relay is exempt: it rides fetch, not the h2 duplex", async () => {
+  it.each([undefined, "relay-1"])("refuses a strict relay on the direct h2 transport (pool %s)", async (proxyPoolId) => {
     const executor = new CursorExecutor();
     const { connect } = stubSession(executor);
     await expect(runAgent(executor, {
       strictProxy: true,
-      proxyPoolId: "relay-1",
+      proxyPoolId,
       vercelRelayUrl: "https://relay.example/",
-    })).resolves.toBeTruthy();
-    expect(connect).toHaveBeenCalledTimes(1);
+    })).rejects.toThrow(/strict proxy/u);
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it("execute() routes the failure through its connection_error envelope", async () => {

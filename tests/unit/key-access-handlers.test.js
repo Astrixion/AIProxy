@@ -20,9 +20,14 @@ vi.mock("@/lib/localDb", () => ({
   getComboByName: async (name) => fx.combos.find((c) => c.name === name) || null,
   getProviderNodes: async () => [],
   getCombos: async () => fx.combos,
-  getProviderConnections: async () => [],
+  getProviderConnections: async () => [{
+    id: "openai-fixture", provider: "openai", isActive: true,
+    providerSpecificData: { enabledModels: ["model-a", "model-b", "text-embedding-3-small"] },
+  }],
   getProviderConnectionById: async () => null,
   getCustomModels: async () => [],
+  resolveAccessToken: async () => null,
+  getProviderKeyState: async () => null,
 }));
 vi.mock("@/lib/disabledModelsDb", () => ({ getDisabledModels: async () => ({}) }));
 vi.mock("@/lib/db/repos/combosRepo.js", () => ({ getCombos: async () => fx.combos }));

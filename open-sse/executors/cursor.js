@@ -258,14 +258,13 @@ const proxyIntentFailed = (proxyOptions) => {
   if (proxyOptions?.strictProxy !== true) return false;
   const proxyIntended = Boolean(
     proxyOptions?.proxyPoolId
+    || proxyOptions?.vercelRelayUrl
     || proxyOptions?.enabled === true
     || proxyOptions?.connectionProxyEnabled === true
     || (proxyOptions?.url || proxyOptions?.connectionProxyUrl || "").trim().length > 0,
   );
   if (!proxyIntended) return false;
-  // A vercel/cloudflare-style relay rides on plain fetch, not this h2 path.
-  if (proxyOptions?.vercelRelayUrl) return false;
-  // Proxy intended and strict: the h2 transport below cannot carry it.
+  // Neither ordinary proxies nor fetch relays can carry this direct h2 path.
   return true;
 };
 

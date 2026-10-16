@@ -417,8 +417,8 @@ async function handleSingleModelChat(
       pxpipeTransform: !scoped && chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
-      // Per-provider user overrides (custom headers / connect timeout) from settings
-      providerOverrides: (chatSettings.providerOverrides || {})[provider] || null,
+      // Global header overrides must not replace a scoped route's pinned credentials.
+      providerOverrides: scoped ? null : (chatSettings.providerOverrides || {})[provider] || null,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {

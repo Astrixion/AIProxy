@@ -55,9 +55,9 @@ describe("/v1/models combo limits", () => {
     });
   });
 
-  it("carries provider-scoped limits through a nested combo", async () => {
+  it.each(["ocg/mimo-v2.5", { model: "ocg/mimo-v2.5", connectionId: "pinned-account" }])("carries provider-scoped limits through a nested combo with seat %j", async (seat) => {
     const models = await modelsWithCombo("opencode-go", "mimo-v2.5", [
-      { name: "inner-combo", models: ["ocg/mimo-v2.5"] },
+      { name: "inner-combo", models: [seat] },
       { name: "outer-combo", models: ["inner-combo"] },
     ]);
     const outer = models.find((model) => model.id === "outer-combo");

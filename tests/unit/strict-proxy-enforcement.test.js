@@ -55,9 +55,9 @@ describe("strict pool keeps strictProxy when the pool is unusable (#4333)", () =
 });
 
 describe("strictProxy refuses a direct connection (#4333)", () => {
-  it("throws when a pool is assigned but no proxy url resolved", async () => {
+  it.each(["api.example.com", "cloudcode-pa.googleapis.com"])("refuses an unresolved strict pool before any direct transport to %s", async (host) => {
     await expect(
-      proxyAwareFetch("https://api.example.com/v1/chat", {}, { proxyPoolId: "p1", strictProxy: true }),
+      proxyAwareFetch(`https://${host}/v1/chat`, {}, { proxyPoolId: "p1", strictProxy: true }),
     ).rejects.toThrow(/strictProxy/);
   });
 
@@ -84,4 +84,34 @@ describe("strictProxy refuses a direct connection (#4333)", () => {
       proxyAwareFetch("https://nonexistent.invalid/v1/chat", {}, { strictProxy: false }),
     ).rejects.not.toThrow(/strictProxy/);
   });
+});
+
+it("rejects an untrusted certificate without sending credentials over insecure TLS", async () => {
+  const { createServer } = await import("node:https");
+  const { once } = await import("node:events");
+  const { generate } = await import("selfsigned");
+  const certificate = await generate([{ name: "commonName", value: "localhost" }], {
+    days: 1,
+    keySize: 2048,
+  });
+  let received = 0;
+  const server = createServer({ key: certificate.private, cert: certificate.cert }, (_req, res) => {
+    received++;
+    res.end("credentials leaked");
+  });
+  for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "STRICT_SSL"]) {
+    vi.stubEnv(name, "");
+  }
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    await expect(proxyAwareFetch(`https://127.0.0.1:${server.address().port}`, {
+      headers: { Authorization: "Bearer synthetic-test-credential" },
+    })).rejects.toThrow();
+    expect(received).toBe(0);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllEnvs();
+  }
 });

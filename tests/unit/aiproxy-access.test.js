@@ -478,4 +478,72 @@ describe("AIProxy provider-key routing", () => {
     )).toBeNull();
     expect(first.id).not.toBe(second.id);
   }, 10000);
+
+  it("keeps scoped routing pinned and isolated after merging global key access and header overrides", async () => {
+    const { createServer } = await import("node:http");
+    const { once } = await import("node:events");
+    const received = [];
+    const server = createServer(async (request, response) => {
+      for await (const _ of request) { /* consume the request */ }
+      received.push(request.headers["x-api-key"]);
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({
+        id: "msg_fixture", type: "message", role: "assistant", model: "test-model",
+        content: [{ type: "text", text: "pinned account reply" }],
+        stop_reason: "end_turn", usage: { input_tokens: 7, output_tokens: 3 },
+      }));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const settings = await db.getSettings();
+    try {
+      const provider = "anthropic-compatible-merge-test";
+      const providerSpecificData = { baseUrl: `http://127.0.0.1:${server.address().port}/v1` };
+      await db.createProviderConnection({
+        provider, authType: "apikey", name: "unselected", apiKey: "wrong-account", providerSpecificData,
+      });
+      const pinned = await db.createProviderConnection({
+        provider, authType: "apikey", name: "pinned", apiKey: "pinned-secret", providerSpecificData,
+      });
+      await db.upsertProviderKeyState("merge-check", "fill-first", [
+        { model: `${provider}/test-model`, connectionId: pinned.id },
+      ]);
+      const issued = await db.createManualAccessToken("merge-check", ["merge-check"]);
+      const globalKey = await db.createApiKey("restricted global", "test-machine");
+      await db.updateApiKey(globalKey.id, { access: { restricted: true, allow: [] } });
+      await db.updateSettings({
+        requireApiKey: true,
+        providerOverrides: { [provider]: { headers: { "x-api-key": "wrong-override" } } },
+      });
+      // Both authorization systems must survive the same backup/import cycle.
+      await db.importDb(await db.exportDb());
+      expect((await db.resolveAccessToken(issued.token)).allowedKeys).toEqual(["merge-check"]);
+      expect((await db.getApiKeyById(globalKey.id)).access).toEqual({ restricted: true, allow: [] });
+
+      const { POST } = await import("@/app/provider/v1/messages/route.js");
+      const { handleChat } = await import("@/sse/handlers/chat.js");
+      const request = (model, token = issued.token) => new Request("http://localhost/provider/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": token },
+        body: JSON.stringify({ model, max_tokens: 32, messages: [{ role: "user", content: "hello" }] }),
+      });
+      const success = await POST(request("merge-check"));
+      expect(success.status).toBe(200);
+      expect(await success.json()).toMatchObject({
+        type: "message", model: "merge-check", content: [{ type: "text", text: "pinned account reply" }],
+      });
+      expect(received).toEqual(["pinned-secret"]);
+      expect((await POST(request("vision-key"))).status).toBe(403);
+      expect((await handleChat(request("merge-check", globalKey.key))).status).toBe(403);
+      await db.updateProviderConnection(pinned.id, { isActive: false });
+      expect((await POST(request("merge-check"))).status).toBe(503);
+      await db.revokeAccessToken(issued.record.id);
+      expect((await POST(request("merge-check"))).status).toBe(403);
+      expect(received).toEqual(["pinned-secret"]);
+    } finally {
+      await db.updateSettings(settings);
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }, 15000);
 });

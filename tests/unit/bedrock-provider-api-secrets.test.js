@@ -117,6 +117,31 @@ describe("Bedrock connection API secrets", () => {
     expect(stored.providerSpecificData.sessionToken).toBe(SESSION_TOKEN);
   });
 
+  it("redacts GLM OAuth bootstrap secrets from provider list and detail", async () => {
+    const { createProviderConnection } = await import("@/lib/db/index.js");
+    const connection = await createProviderConnection({
+      provider: "glm",
+      authType: "oauth",
+      name: "GLM OAuth",
+      accessToken: "inference-secret",
+      providerSpecificData: {
+        zcodeJwtToken: "zcode-secret",
+        zaiBusinessToken: "business-secret",
+        zaiRefreshToken: "refresh-secret",
+        region: "global",
+      },
+    });
+    const detail = await getConnection(
+      new Request(`https://9router.local/api/providers/${connection.id}`),
+      { params: Promise.resolve({ id: connection.id }) },
+    );
+    const body = await detail.json();
+    expect(body.connection.providerSpecificData).toEqual({ region: "global" });
+    expect(JSON.stringify(await (await listConnections()).json())).not.toContain("-secret");
+    expect((await getStoredConnection(connection.id)).providerSpecificData.zaiRefreshToken)
+      .toBe("refresh-secret");
+  });
+
   it("removes a saved AWS session token only when the edit explicitly clears it", async () => {
     const created = await createAwsConnection("bedrock");
     const id = created.body.connection.id;
