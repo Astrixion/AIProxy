@@ -1,5 +1,9 @@
 # AIProxy extension (unreleased)
 
+- Add opt-in managed blue-green releases with native SQLite compatibility checks,
+  cross-process credential refresh coordination and drain accounting through stream
+  completion and final persistence. Standby never migrates; incomplete drains retain
+  the old release. Production activation and initial slot conversion remain operator actions.
 - Add a separate scoped-traffic Dashboard with reported usage and request outcomes,
   plus searchable provider keys and sortable, paginated token/history tables with
   session drill-down. Summaries cover the latest 200 loaded attempts, not live traffic.

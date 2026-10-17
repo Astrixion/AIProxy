@@ -316,6 +316,9 @@ export async function runQuotaAutoPingTick(deps = createDefaultDeps(), state = g
 }
 
 export function startQuotaAutoPing() {
+  if (process.env.AIPROXY_DEPLOYMENT_MODE === "managed") {
+    throw new Error("Quota auto-ping is unavailable in managed deployment");
+  }
   if (g.interval) return;
   console.log("[AutoPing] scheduler started");
   runQuotaAutoPingTick().catch(() => {});

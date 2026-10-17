@@ -106,6 +106,19 @@ export async function getSettings() {
   return mergeWithDefaults(raw);
 }
 
+export function assertManagedSettings(settings) {
+  const owners = ["cloudEnabled", "tunnelEnabled", "tailscaleEnabled", "mitmEnabled"];
+  if (owners.some((key) => settings[key])) throw new Error("Disable optional cloud/tunnel/MITM owners before managed deployment");
+  for (const name of ["claudeAutoPing", "codexAutoPing"]) {
+    const config = settings[name];
+    if (Object.values(config?.connections || {}).some(Boolean)
+        || Object.values(config?.schedules || {}).some((item) => item?.enabled)) {
+      throw new Error("Disable quota auto-ping before managed deployment");
+    }
+  }
+  if (settings.requireLogin !== true) throw new Error("Managed deployment requires dashboard login");
+}
+
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
 export async function updateSettings(updates) {
   const db = await getAdapter();
@@ -114,6 +127,7 @@ export async function updateSettings(updates) {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);
     const current = row ? parseJson(row.data, {}) : {};
     next = { ...current, ...updates };
+    if (process.env.AIPROXY_DEPLOYMENT_MODE === "managed") assertManagedSettings(mergeWithDefaults(next));
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
       [stringifyJson(next)],

@@ -1,4 +1,5 @@
 import { completeProviderRequest, startProviderRequest } from "@/lib/localDb";
+import { beginDeploymentWork } from "open-sse/services/deployment.js";
 
 function numeric(value) {
   const result = Number(value);
@@ -68,6 +69,7 @@ function inspectEvent(raw, state) {
 }
 
 function observeBody(stream, requestId, responseStatus, contentType) {
+  const finish = beginDeploymentWork("provider stream history");
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   const isSse = contentType.includes("text/event-stream");
@@ -111,6 +113,8 @@ function observeBody(stream, requestId, responseStatus, contentType) {
       await completeProviderRequest(requestId, { status, usage });
     } catch {
       // History must never change inference outcome.
+    } finally {
+      finish();
     }
   }
 

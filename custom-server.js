@@ -4,6 +4,24 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { pathToFileURL } = require("url");
 
+const deployment = process.env.AIPROXY_DEPLOYMENT_MODE === "managed"
+  ? require("./deployment-runtime.cjs")() : null;
+if (deployment) {
+  globalThis[Symbol.for("aiproxy.deployment")] = deployment;
+  process.env.NEXT_MANUAL_SIG_HANDLE = "true";
+  const stop = () => {
+    deployment.drain();
+    const timer = setInterval(() => {
+      if (deployment.status().drained) {
+        clearInterval(timer);
+        process.exit(0);
+      }
+    }, 250);
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+}
+
 const origCreate = http.createServer.bind(http);
 
 // Per-process secret proving x-9r-real-ip was stamped below rather than sent by the client.
@@ -16,6 +34,7 @@ process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
 let backgroundRefreshStarted = false;
 
 function startBackgroundTokenRefreshFromCustomServer() {
+  if (deployment) return; // Managed background ownership is initialized by readiness.
   if (backgroundRefreshStarted) return;
   backgroundRefreshStarted = true;
   // Prefer source path (repo / standalone that still has src). Fail-open if missing
@@ -70,6 +89,31 @@ http.createServer = (...args) => {
     req.headers["x-9r-real-ip"] = ip;
     req.headers["x-9r-peer-token"] = PEER_TOKEN;
     if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
+    if (deployment) {
+      let pathname;
+      try {
+        pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
+      } catch {
+        res.writeHead(400);
+        return res.end();
+      }
+      if (pathname === "/api/internal/deployment") {
+        if (!deployment.authenticated(req)) {
+          res.writeHead(404);
+          return res.end();
+        }
+        return handler(req, res);
+      }
+      // Host-owned daemons, database replacement and unscoped inference do not
+      // participate in this deployment contract. Keep them fenced on slot ports too.
+      if (/^\/(v1|v1beta|responses|codex|systemone)(\/|$)/.test(pathname)
+          || /^\/api\/(v1|v1beta|cloud|tunnel|mcp|cli-tools|headroom|pxpipe|shutdown|translator\/send)(\/|$)/.test(pathname)
+          || /^\/api\/(settings\/database|version\/(shutdown|update))(\/|$)/.test(pathname)) {
+        res.writeHead(404);
+        return res.end();
+      }
+      return deployment.handle(req, res, handler, pathname);
+    }
     return handler(req, res);
   };
   const server = origCreate(...rest, wrapped);

@@ -43,7 +43,8 @@ RUN if [ "$ALPINE_MIRROR" != "dl-cdn.alpinelinux.org" ]; then \
     fi
 
 LABEL org.opencontainers.image.title="9router" \
-      org.opencontainers.image.version="${APP_VERSION}"
+      org.opencontainers.image.version="${APP_VERSION}" \
+      ai.astrixion.aiproxy.deployment-protocol="1"
 
 ENV NODE_ENV=production
 ENV PORT=20128
@@ -55,6 +56,7 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/custom-server.js ./custom-server.js
+COPY --from=builder /app/deployment-runtime.cjs ./deployment-runtime.cjs
 COPY --from=builder /app/open-sse ./open-sse
 # Next file tracing can omit sibling files; MITM runs server.js as a separate process.
 COPY --from=builder /app/src/mitm ./src/mitm
@@ -74,8 +76,8 @@ RUN mkdir -p /app/data && chown -R node:node /app && \
 
 # Avoid a full distribution upgrade in the runtime image. It makes builds less
 # reproducible and is unrelated to installing the runtime entrypoint helper.
-RUN apk add --no-cache su-exec && \
-  printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home 2>/dev/null\nexec su-exec node "$@"\n' > /entrypoint.sh && \
+RUN apk add --no-cache su-exec util-linux && \
+  printf '#!/bin/sh\nif [ "$AIPROXY_DEPLOYMENT_MODE" != managed ]; then chown -R node:node /app/data /app/data-home 2>/dev/null; fi\nexec su-exec node "$@"\n' > /entrypoint.sh && \
   chmod +x /entrypoint.sh
 
 EXPOSE 20128

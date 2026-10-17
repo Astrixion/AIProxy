@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { trackDeploymentWork } from "open-sse/services/deployment.js";
 
 function rowToRequest(row) {
   if (!row) return null;
@@ -10,7 +11,11 @@ function rowToRequest(row) {
   };
 }
 
-export async function startProviderRequest(record) {
+export function startProviderRequest(record) {
+  return trackDeploymentWork("provider history start", () => persistProviderRequestStart(record));
+}
+
+async function persistProviderRequestStart(record) {
   const db = await getAdapter();
   const request = {
     id: randomUUID(),
@@ -47,7 +52,11 @@ export async function startProviderRequest(record) {
   return request;
 }
 
-export async function completeProviderRequest(id, { status, usage = null }) {
+export function completeProviderRequest(id, result) {
+  return trackDeploymentWork("provider history persistence", () => persistProviderRequest(id, result));
+}
+
+async function persistProviderRequest(id, { status, usage = null }) {
   const db = await getAdapter();
   const completedAt = new Date().toISOString();
   db.run(

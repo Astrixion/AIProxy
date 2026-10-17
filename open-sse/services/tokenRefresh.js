@@ -130,10 +130,28 @@ export async function refreshVertexToken(saJson, log) {
   }
 }
 
-function vertexRefreshHandler(c, log) {
+async function vertexRefreshHandler(c, log) {
   const saJson = parseVertexSaJson(c.apiKey);
-  if (!saJson) return null;
-  return refreshVertexToken(saJson, log);
+  if (saJson) return refreshVertexToken(saJson, log);
+  const adc = parseVertexAdcJson(c.apiKey);
+  if (!adc) return null;
+  const result = await refreshGoogleToken(adc.refresh_token, adc.client_id, adc.client_secret, log);
+  if (!result?.accessToken) return result;
+  return {
+    ...result,
+    apiKey: JSON.stringify({ ...adc, refresh_token: result.refreshToken || adc.refresh_token }),
+  };
+}
+
+export function parseVertexAdcJson(apiKey) {
+  if (typeof apiKey !== "string") return null;
+  try {
+    const parsed = JSON.parse(apiKey);
+    return parsed.type === "authorized_user" && parsed.client_id && parsed.client_secret && parsed.refresh_token
+      ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 const REFRESH_HANDLERS = {
@@ -189,8 +207,9 @@ async function _getAccessTokenInternal(provider, credentials, log) {
 }
 
 export async function refreshTokenByProvider(provider, credentials, log) {
-  if (!credentials.refreshToken) return null;
   const handler = REFRESH_HANDLERS[provider];
+  if (handler === vertexRefreshHandler) return handler(credentials, log);
+  if (!credentials.refreshToken) return null;
   return handler ? handler(credentials, log) : refreshAccessToken(provider, credentials.refreshToken, credentials, log);
 }
 

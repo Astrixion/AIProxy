@@ -184,6 +184,9 @@ async function collectEntries() {
 
 // Run one sync. Returns a summary, or null when it could not complete.
 export async function syncModelCatalog() {
+  if (process.env.AIPROXY_DEPLOYMENT_MODE === "managed") {
+    throw new Error("Catalog sync requires exclusive maintenance outside managed deployment");
+  }
   if (state.running) return null;
   state.running = true;
   try {
@@ -254,6 +257,7 @@ function restoreEtag() {
 
 // Schedule the recurring sync. Disable entirely with MODEL_CATALOG_SYNC=off.
 export function startModelCatalogSync() {
+  if (process.env.AIPROXY_DEPLOYMENT_MODE === "managed") return;
   if (timer) return;
   if (String(process.env.MODEL_CATALOG_SYNC || "").toLowerCase() === "off") return;
   restoreEtag();

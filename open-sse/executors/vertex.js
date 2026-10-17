@@ -1,33 +1,12 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { getModelMeta } from "../config/providerModels.js";
-import { parseVertexSaJson, refreshVertexToken, refreshGoogleToken } from "../services/tokenRefresh.js";
+import { parseVertexSaJson, parseVertexAdcJson, refreshVertexToken, refreshGoogleToken, refreshTokenByProvider } from "../services/tokenRefresh.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { deploymentRuntime, refreshDeploymentCredentials } from "../services/deployment.js";
 
 // Cache project IDs resolved from raw API keys { apiKey → projectId }
 const projectIdCache = new Map();
-
-/**
- * Parse Google ADC user credential JSON from apiKey string.
- * This is the format produced by `gcloud auth application-default login`.
- */
-function parseVertexAdcJson(apiKey) {
-  if (typeof apiKey !== "string") return null;
-  try {
-    const parsed = JSON.parse(apiKey);
-    if (
-      parsed.type === "authorized_user" &&
-      parsed.client_id &&
-      parsed.client_secret &&
-      parsed.refresh_token
-    ) {
-      return parsed;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Resolve GCP project ID from a raw Vertex API key.
@@ -127,6 +106,7 @@ export class VertexExecutor extends BaseExecutor {
   }
 
   async refreshCredentials(credentials, log) {
+    if (deploymentRuntime()) return refreshTokenByProvider(this.provider, credentials, log);
     const saJson = parseVertexSaJson(credentials?.apiKey);
     if (!saJson) return null;
 
@@ -140,15 +120,21 @@ export class VertexExecutor extends BaseExecutor {
     const saJson = parseVertexSaJson(credentials?.apiKey);
     const adcJson = parseVertexAdcJson(credentials?.apiKey);
 
+    if (deploymentRuntime() && (saJson || adcJson)) {
+      const refreshed = await refreshDeploymentCredentials(this.provider, credentials,
+        (current) => this.refreshCredentials(current, log));
+      Object.assign(credentials, refreshed);
+    }
+
     // SA JSON flow: mint Bearer token via JWT assertion (cached)
-    if (saJson) {
+    if (saJson && !deploymentRuntime()) {
       const result = await refreshVertexToken(saJson, log);
       if (!result?.accessToken) throw new Error("Vertex: failed to mint access token from Service Account JSON");
       credentials.accessToken = result.accessToken;
     }
 
     // ADC user credential flow: refresh Bearer token via Google OAuth2 token endpoint
-    if (adcJson) {
+    if (adcJson && !deploymentRuntime()) {
       const result = await refreshGoogleToken(
         adcJson.refresh_token,
         adcJson.client_id,

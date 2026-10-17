@@ -1,4 +1,5 @@
 import { makeKv } from "../../src/lib/db/helpers/kvStore.js";
+import { deploymentRuntime, trackDeploymentWork } from "./deployment.js";
 
 const MAX_SIGNATURES = 2000;
 const MAX_PERSISTED_SIGNATURES = 10_000;
@@ -79,6 +80,13 @@ async function maybePrunePersisted() {
   }
 }
 
+function persistSignatures(fn) {
+  return trackDeploymentWork("thought signature persistence", () => {
+    const runtime = deploymentRuntime();
+    return runtime ? runtime.withLock("thought-signatures", fn) : fn();
+  });
+}
+
 /**
  * Store a thought signature for a tool_call_id with optional sessionId namespace (RAM + SQLite async).
  * `model` is the model that produced the signature; lookups for another model family skip it.
@@ -103,17 +111,20 @@ export function storeGeminiThoughtSignature(toolCallId, signature, sessionId = n
       family,
       expiresAt: now + MEMORY_TTL_MS,
     });
-
-    // Async persist to SQLite kv table without blocking
-    signatureKv.set(k, {
-      signature,
-      family,
-      createdAt: now,
-      expiresAt: now + PERSISTED_TTL_MS,
-    }).catch(() => {});
   }
 
-  maybePrunePersisted().catch(() => {});
+  // Include the entire detached chain, including pruning, in deployment drain.
+  persistSignatures(async () => {
+    for (const k of keys) {
+      await signatureKv.set(k, {
+        signature,
+        family,
+        createdAt: now,
+        expiresAt: now + PERSISTED_TTL_MS,
+      });
+    }
+    await maybePrunePersisted();
+  }).catch(() => {});
 }
 
 /**
@@ -156,7 +167,10 @@ export async function getGeminiThoughtSignature(toolCallId, sessionId = null, mo
     const row = await signatureKv.get(toolCallId);
     if (row && typeof row.signature === "string") {
       if (row.expiresAt && row.expiresAt <= Date.now()) {
-        signatureKv.remove(toolCallId).catch(() => {});
+        persistSignatures(async () => {
+          const current = await signatureKv.get(toolCallId);
+          if (current?.expiresAt && current.expiresAt <= Date.now()) await signatureKv.remove(toolCallId);
+        }).catch(() => {});
         return null;
       }
       if (!isCompatible(row, family)) return null;
@@ -181,6 +195,15 @@ export async function getGeminiThoughtSignature(toolCallId, sessionId = null, mo
 export function getGeminiThoughtSignatureSync(toolCallId, sessionId = null, model = null) {
   if (typeof toolCallId !== "string" || !toolCallId) return null;
   const family = signatureFamily(model);
+  const runtime = deploymentRuntime();
+  if (runtime?.readThoughtSignature) {
+    const keys = sessionId ? [`${sessionId}:${toolCallId}`, toolCallId] : [toolCallId];
+    for (const key of keys) {
+      const entry = runtime.readThoughtSignature(key);
+      if (typeof entry?.signature === "string" && (!entry.expiresAt || entry.expiresAt > Date.now())
+          && isCompatible(entry, family)) return entry.signature;
+    }
+  }
   pruneMemoryExpired();
 
   if (sessionId && typeof sessionId === "string") {

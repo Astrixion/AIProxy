@@ -1,6 +1,7 @@
 // Built-in node:sqlite adapter — available in Node >= 22.5.0.
 // No native build, no npm install. API mirrors betterSqliteAdapter.
 import { PRAGMA_SQL } from "../schema.js";
+import { existsSync } from "node:fs";
 
 const CHECKPOINT_INTERVAL_MS = 60 * 1000;
 
@@ -18,9 +19,19 @@ export async function createNodeSqliteAdapter(filePath) {
   // Dynamic import — fails on Node < 22.5 → driver.js falls back to sql.js
   const sqlite = await import("node:sqlite");
   const Database = sqlite.DatabaseSync;
+  const managed = process.env.AIPROXY_DEPLOYMENT_MODE === "managed";
+  if (managed && !existsSync(filePath)) throw new Error("Managed deployment requires an existing database");
   const db = new Database(filePath);
 
-  db.exec(PRAGMA_SQL);
+  if (managed) {
+    if (db.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
+      db.close();
+      throw new Error("Managed deployment requires existing WAL mode");
+    }
+    db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL;");
+  } else {
+    db.exec(PRAGMA_SQL);
+  }
 
   const stmtCache = new Map();
   function prepare(sql) {
@@ -34,7 +45,7 @@ export async function createNodeSqliteAdapter(filePath) {
 
   // Periodic WAL checkpoint to keep -wal/-shm small
   const checkpointTimer = setInterval(() => {
-    try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
+    if (!managed) { try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {} }
   }, CHECKPOINT_INTERVAL_MS);
   if (typeof checkpointTimer.unref === "function") checkpointTimer.unref();
 
@@ -45,8 +56,12 @@ export async function createNodeSqliteAdapter(filePath) {
   }
   const onShutdown = () => gracefulClose();
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  if (!managed) {
+    process.once("SIGINT", () => { onShutdown(); process.exit(0); });
+    process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  }
+
+  let transactionDepth = 0;
 
   return {
     driver: "node:sqlite",
@@ -62,16 +77,24 @@ export async function createNodeSqliteAdapter(filePath) {
     },
     exec(sql) { return db.exec(sql); },
     transaction(fn) {
-      // node:sqlite has no transaction wrapper. Use SAVEPOINT for nested support.
+      // Acquire the write reservation before reading: deferred WAL transactions
+      // cannot upgrade a stale read snapshot when the other release has written.
       const sp = `sp_${Math.random().toString(36).slice(2)}`;
-      db.exec(`SAVEPOINT ${sp}`);
+      const outer = transactionDepth === 0;
+      db.exec(outer ? "BEGIN IMMEDIATE" : `SAVEPOINT ${sp}`);
+      transactionDepth++;
       try {
         const r = fn();
-        db.exec(`RELEASE ${sp}`);
+        db.exec(outer ? "COMMIT" : `RELEASE ${sp}`);
         return r;
       } catch (e) {
-        try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch {}
+        try {
+          if (outer) db.exec("ROLLBACK");
+          else { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); }
+        } catch {}
         throw e;
+      } finally {
+        transactionDepth--;
       }
     },
     checkpoint() { try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {} },

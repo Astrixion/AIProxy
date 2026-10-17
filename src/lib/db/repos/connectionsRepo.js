@@ -260,7 +260,7 @@ export async function createProviderConnection(data) {
 }
 
 // Critical: OAuth refresh token race — atomic merge inside transaction
-export async function updateProviderConnection(id, data) {
+export async function updateProviderConnection(id, data, { completeRefresh = false } = {}) {
   const db = await getAdapter();
   let result;
   db.transaction(() => {
@@ -270,6 +270,7 @@ export async function updateProviderConnection(id, data) {
     const normalized = resetHealthStateOnActivation(existing, data);
     const merged = { ...existing, ...normalized, updatedAt: new Date().toISOString() };
     upsert(db, merged);
+    if (completeRefresh) db.run("DELETE FROM _meta WHERE key = ?", [`credentialRefreshInFlight:${id}`]);
     if (data.priority !== undefined) reorderInTx(db, existing.provider);
     result = merged;
   });

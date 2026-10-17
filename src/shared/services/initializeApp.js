@@ -50,6 +50,9 @@ const g = global.__appSingleton ??= {
 };
 
 export async function initializeApp() {
+  // Managed slots initialize through authenticated readiness. No cleanup,
+  // tunnels, quota pings, or competing signal handlers during standby/overlap.
+  if (process.env.AIPROXY_DEPLOYMENT_MODE === "managed") return;
   try {
     // Register cleanup + exit-respawn callback immediately so signals and
     // unexpected cloudflared exits are handled even during the deferred window.
@@ -328,6 +331,12 @@ function stopNetworkMonitor() {
 }
 
 export function configureTunnelMonitoring(settings) {
+  if (process.env.AIPROXY_DEPLOYMENT_MODE === "managed") {
+    if (settings?.tunnelEnabled || settings?.tailscaleEnabled) {
+      throw new Error("Tunnels are unavailable in managed deployment");
+    }
+    return;
+  }
   if (settings?.tunnelEnabled || settings?.tailscaleEnabled) {
     startWatchdog();
     startNetworkMonitor();

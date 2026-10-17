@@ -4,6 +4,7 @@
 import * as log from "../utils/logger.js";
 import { getRefreshLeadMs } from "open-sse/services/tokenRefresh.js";
 import { getCredentialExpiryMs } from "open-sse/services/oauthCredentialManager.js";
+import { deploymentRuntime } from "open-sse/services/deployment.js";
 
 /** Refresh when expiry is within 30 minutes (or the provider on-request lead, whichever larger). */
 export const BACKGROUND_REFRESH_LEAD_MS = 30 * 60 * 1000;
@@ -89,7 +90,23 @@ async function refreshOne(connection) {
  */
 export async function runBackgroundTokenRefreshTick(deps = {}) {
   if (tickRunning) return;
+  const runtime = deploymentRuntime();
+  if (runtime && !runtime.ownsBackground()) return;
   tickRunning = true;
+  try {
+    if (runtime) {
+      await runtime.track("background refresh", () => runtime.withLock("background", async () => {
+        if (runtime.ownsBackground()) await refreshTick(deps);
+      }));
+    } else {
+      await refreshTick(deps);
+    }
+  } finally {
+    tickRunning = false;
+  }
+}
+
+async function refreshTick(deps) {
   try {
     const load = deps.loadConnections || loadActiveConnections;
     const refresh = deps.refreshConnection || refreshOne;
@@ -104,6 +121,7 @@ export async function runBackgroundTokenRefreshTick(deps = {}) {
     const baseNormalDelay = Number(process.env.BG_REFRESH_DELAY_MS) || 1_500;
 
     for (let i = 0; i < due.length; i++) {
+      if (deploymentRuntime() && !deploymentRuntime().ownsBackground()) break;
       const conn = due[i];
       try {
         await refresh(conn);
@@ -133,8 +151,6 @@ export async function runBackgroundTokenRefreshTick(deps = {}) {
     log.warn("BG_TOKEN_REFRESH", "Tick failed (swallowed)", {
       error: err?.message ?? String(err),
     });
-  } finally {
-    tickRunning = false;
   }
 }
 

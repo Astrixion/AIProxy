@@ -213,6 +213,19 @@ function importLegacyDetails(adapter, data) {
 }
 
 // ─── Main entry ──────────────────────────────────────────────────────────
+export function assertCompatibleSchema(adapter) {
+  if (Number(getMetaSync(adapter, "schemaVersion")) !== latestVersion()
+      || Number(getMetaSync(adapter, "backupSchemaVersion")) !== SCHEMA_VERSION) {
+    throw new Error("Schema mismatch: overlap cannot run migrations");
+  }
+  for (const [table, definition] of Object.entries(TABLES)) {
+    const columns = new Set(adapter.all(`PRAGMA table_info(${table})`).map((column) => column.name));
+    if (Object.keys(definition.columns).some((column) => !columns.has(column))) {
+      throw new Error(`Schema mismatch: ${table}`);
+    }
+  }
+}
+
 export async function runMigrationOnce(adapter) {
   if (_migratedAdapters.has(adapter)) return;
   _migratedAdapters.add(adapter);

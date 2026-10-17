@@ -5,8 +5,8 @@ function bearerToken(request) {
   return authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
 }
 
-export function internalApiStatus(request) {
-  const expected = process.env.AIPROXY_CONTROL_TOKEN;
+export function internalApiStatus(request, { deployment = false } = {}) {
+  const expected = deployment ? process.env.AIPROXY_DEPLOYMENT_TOKEN : process.env.AIPROXY_CONTROL_TOKEN;
   if (!expected) {
     return { ok: false, status: 503, error: "AIPROXY_CONTROL_TOKEN is not configured" };
   }
@@ -21,8 +21,8 @@ export function internalApiStatus(request) {
     : { ok: false, status: 401, error: "Invalid control token" };
 }
 
-export function requireInternalApi(request) {
-  const auth = internalApiStatus(request);
+export function requireInternalApi(request, options) {
+  const auth = internalApiStatus(request, options);
   if (auth.ok) return null;
   return Response.json({ error: auth.error }, { status: auth.status });
 }

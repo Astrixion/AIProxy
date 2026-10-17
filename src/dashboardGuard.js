@@ -230,7 +230,7 @@ export async function proxy(request) {
   }
 
   if (pathname === "/api/internal" || pathname.startsWith("/api/internal/")) {
-    const auth = internalApiStatus(request);
+    const auth = internalApiStatus(request, { deployment: pathname === "/api/internal/deployment" });
     if (auth.ok) return NextResponse.next();
     return NextResponse.json({ error: auth.error }, { status: auth.status });
   }

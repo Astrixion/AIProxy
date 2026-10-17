@@ -1,5 +1,6 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { deploymentRuntime, trackDeploymentWork } from "open-sse/services/deployment.js";
 
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
@@ -38,7 +39,8 @@ async function getObservabilityConfig() {
       batchSize: settings.observabilityBatchSize || parseInt(process.env.OBSERVABILITY_BATCH_SIZE || String(DEFAULT_BATCH_SIZE), 10),
       flushIntervalMs: settings.observabilityFlushIntervalMs || parseInt(process.env.OBSERVABILITY_FLUSH_INTERVAL_MS || String(DEFAULT_FLUSH_INTERVAL_MS), 10),
     };
-  } catch {
+  } catch (error) {
+    if (deploymentRuntime()) throw error;
     cachedConfig = {
       enabled: false,
       maxRecords: DEFAULT_MAX_RECORDS,
@@ -52,7 +54,7 @@ async function getObservabilityConfig() {
 
 let writeBuffer = [];
 let flushTimer = null;
-let isFlushing = false;
+let flushPromise = null;
 
 function sanitizeHeaders(headers) {
   if (!headers || typeof headers !== "object") return {};
@@ -73,10 +75,12 @@ function generateDetailId(model) {
   return `${timestamp}-${random}-${modelPart}`;
 }
 
-async function flushToDatabase() {
-  if (isFlushing) return;
-  if (writeBuffer.length === 0) return;
-  isFlushing = true;
+function flushToDatabase() {
+  if (!flushPromise) flushPromise = flushBufferedDetails().finally(() => { flushPromise = null; });
+  return flushPromise;
+}
+
+async function flushBufferedDetails() {
   try {
     // Drain entire buffer (loop in case more pushed during await)
     while (writeBuffer.length > 0) {
@@ -119,12 +123,15 @@ async function flushToDatabase() {
     }
   } catch (e) {
     console.error("[requestDetailsRepo] Batch write failed:", e);
-  } finally {
-    isFlushing = false;
+    if (deploymentRuntime()) throw e;
   }
 }
 
-export async function saveRequestDetail(detail) {
+export function saveRequestDetail(detail) {
+  return trackDeploymentWork("request detail persistence", () => enqueueRequestDetail(detail));
+}
+
+async function enqueueRequestDetail(detail) {
   const config = await getObservabilityConfig();
   if (!config.enabled) {return;}
 
@@ -141,6 +148,11 @@ export async function saveRequestDetail(detail) {
     tokens: detail.tokens,
     pxpipe: detail.pxpipe,
   });
+
+  if (deploymentRuntime()) {
+    do { await flushToDatabase(); } while (writeBuffer.length > 0);
+    return;
+  }
 
   // Trigger immediate flush if batch threshold reached.
   // flushToDatabase() drains entire buffer in a loop, so all pushes during await are persisted.
@@ -217,4 +229,4 @@ function ensureShutdownHandler() {
   process.on("exit", _shutdownHandler);
 }
 
-ensureShutdownHandler();
+if (process.env.AIPROXY_DEPLOYMENT_MODE !== "managed") ensureShutdownHandler();

@@ -57,6 +57,19 @@ async function trySqlJs() {
 }
 
 async function initAdapter() {
+  if (process.env.AIPROXY_DEPLOYMENT_MODE === "managed") {
+    // No fallback, directory creation, legacy import, schema sync or migration during overlap.
+    const { createNodeSqliteAdapter } = await import("./adapters/nodeSqliteAdapter.js");
+    const adapter = await createNodeSqliteAdapter(DATA_FILE);
+    const { assertCompatibleSchema } = await import("./migrate.js");
+    try {
+      assertCompatibleSchema(adapter);
+      return adapter;
+    } catch (error) {
+      adapter.close();
+      throw error;
+    }
+  }
   ensureDirs();
   // Order per runtime:
   //   Bun:  bun:sqlite → sql.js

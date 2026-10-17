@@ -1,5 +1,6 @@
 // Re-export from open-sse with local logger
 import * as log from "../utils/logger.js";
+import { deploymentRuntime, refreshDeploymentCredentials, trackDeploymentWork } from "open-sse/services/deployment.js";
 import { getProviderConnectionById, updateProviderConnection } from "../../lib/localDb.js";
 import {
   getProjectIdForConnection,
@@ -164,7 +165,11 @@ function _refreshProjectId(provider, connectionId, accessToken) {
  * @param {object} newCredentials
  * @returns {Promise<boolean>}
  */
-export async function updateProviderCredentials(connectionId, newCredentials) {
+export function updateProviderCredentials(connectionId, newCredentials) {
+  return trackDeploymentWork("credential persistence", () => persistProviderCredentials(connectionId, newCredentials));
+}
+
+async function persistProviderCredentials(connectionId, newCredentials) {
   try {
     const updates = {};
 
@@ -210,6 +215,7 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
       connectionId,
       error: error.message,
     });
+    if (deploymentRuntime()) throw error;
     return false;
   }
 }
@@ -227,6 +233,15 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
  * @returns {Promise<object>} updated credentials object
  */
 export async function checkAndRefreshToken(provider, credentials, options = {}) {
+  const runtime = deploymentRuntime();
+  if (runtime) {
+    return runtime.track("proactive refresh", () => runtime.withLock("credentials", () =>
+      checkAndRefreshTokenUnlocked(provider, credentials, options)));
+  }
+  return checkAndRefreshTokenUnlocked(provider, credentials, options);
+}
+
+async function checkAndRefreshTokenUnlocked(provider, credentials, options) {
   let creds = { ...credentials };
   if (!creds.connectionId && creds.id) {
     creds.connectionId = creds.id;
@@ -235,7 +250,14 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
   // Adopt latest DB tokens: OpenAI rotates the refresh token on every refresh, and
   // refreshing with a stale snapshot (reuse) revokes the whole session → account logout.
   if (creds.connectionId) {
-    const latest = await getProviderConnectionById(creds.connectionId).catch(() => null);
+    const latest = await getProviderConnectionById(creds.connectionId).catch((error) => {
+      if (deploymentRuntime()) throw error;
+      return null;
+    });
+    if (deploymentRuntime()) {
+      if (!latest || !latest.isActive) throw new Error("Credential connection is unavailable");
+      creds = { ...creds, ...latest, providerSpecificData: { ...creds.providerSpecificData, ...latest.providerSpecificData } };
+    }
     const latestRefreshMs = Date.parse(latest?.lastRefreshAt || "");
     const credsRefreshMs = Date.parse(creds.lastRefreshAt || "");
     const dbIsNewer = Number.isFinite(latestRefreshMs)
@@ -266,7 +288,8 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
       lastRefreshAt: creds.lastRefreshAt || null,
     });
 
-    const newCreds = await _refreshProviderCredentials(provider, creds, log);
+    const newCreds = await refreshDeploymentCredentials(provider, creds,
+      (current) => _refreshProviderCredentials(provider, current, log));
     if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
       const mergedCreds = {
         ...newCreds,
@@ -274,7 +297,7 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
       };
 
       // Persist to DB (non-blocking path continues below)
-      await updateProviderCredentials(creds.connectionId, mergedCreds);
+      if (!deploymentRuntime()) await updateProviderCredentials(creds.connectionId, mergedCreds);
 
       creds = {
         ...creds,

@@ -1,6 +1,7 @@
 // Stream handler with disconnect detection - shared for all providers
 import { STREAM_STALL_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
+import { beginDeploymentWork } from "../services/deployment.js";
 
 // Get HH:MM:SS timestamp
 function getTimeString() {
@@ -102,6 +103,7 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
 export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null) {
   const reader = transformStream.readable.getReader();
   const writer = transformStream.writable.getWriter();
+  const finish = beginDeploymentWork("upstream stream");
   let terminalEmitted = false;
 
   // Emit a synthesized terminal payload (e.g. Responses response.failed + [DONE]) once
@@ -117,6 +119,8 @@ export function createDisconnectAwareStream(transformStream, streamController, o
   return new ReadableStream({
     async pull(controller) {
       if (!streamController.isConnected()) {
+        await Promise.allSettled([reader.cancel(), writer.abort()]);
+        finish();
         emitTerminal(controller);
         controller.close();
         return;
@@ -127,6 +131,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
 
         if (done) {
           streamController.handleComplete();
+          finish();
           controller.close();
           return;
         }
@@ -137,8 +142,8 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         const msg0 = error?.message || "";
         const isControllerClosed = msg0.includes("already closed") || msg0.includes("Invalid state");
         if (!isControllerClosed) streamController.handleError(error);
-        reader.cancel().catch(() => {});
-        writer.abort().catch(() => {});
+        await Promise.allSettled([reader.cancel(), writer.abort()]);
+        finish();
 
         // Treat network resets / socket hang up / abort as graceful close
         const msg = error?.message || "";
@@ -168,10 +173,10 @@ export function createDisconnectAwareStream(transformStream, streamController, o
       }
     },
 
-    cancel(reason) {
+    async cancel(reason) {
       streamController.handleDisconnect(reason || "cancelled");
-      reader.cancel();
-      writer.abort();
+      await Promise.allSettled([reader.cancel(reason), writer.abort(reason)]);
+      finish();
     }
   });
 }
@@ -257,4 +262,3 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     onAbortTerminal ? () => onAbortTerminal(abortMessage) : null
   );
 }
-

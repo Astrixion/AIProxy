@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getMeta, setMeta } from "../helpers/metaStore.js";
+import { deploymentRuntime, trackDeploymentWork } from "open-sse/services/deployment.js";
 
 function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
@@ -240,7 +241,11 @@ export async function getActiveRequests() {
   return { activeRequests, recentRequests, errorProvider };
 }
 
-export async function saveRequestUsage(entry) {
+export function saveRequestUsage(entry) {
+  return trackDeploymentWork("usage persistence", () => persistRequestUsage(entry));
+}
+
+async function persistRequestUsage(entry) {
   try {
     const db = await getAdapter();
 
@@ -312,6 +317,7 @@ export async function saveRequestUsage(entry) {
     }
   } catch (e) {
     console.error("Failed to save usage stats:", e);
+    if (deploymentRuntime()) throw e;
   }
 }
 

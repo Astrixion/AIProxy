@@ -5,6 +5,7 @@ import { FORMATS } from "../translator/formats.js";
 import { normalizeClaudePassthrough, anchorClaudeCache } from "../translator/formats/claude.js";
 import { createStreamController } from "../utils/streamHandler.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
+import { deploymentRuntime, refreshDeploymentCredentials } from "../services/deployment.js";
 import { createRequestLogger } from "../utils/requestLogger.js";
 import { getModelTargetFormat, getModelSupportedFormats, getModelStrip, getModelUpstreamId, getModelType, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 import { PROVIDERS } from "../config/providers.js";
@@ -445,7 +446,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       // refreshWithRetry's 2nd/3rd attempt reuses the already-consumed RT →
       // invalid_grant → auth_failed retryable=false.
       const newCredentials = await refreshWithRetry(async () => {
-        const result = await executor.refreshCredentials(credentials, log);
+        const result = await refreshDeploymentCredentials(provider, credentials,
+          (current) => executor.refreshCredentials(current, log));
         if (result?.refreshToken && result.refreshToken !== credentials.refreshToken) {
           if (result.accessToken) credentials.accessToken = result.accessToken;
           credentials.refreshToken = result.refreshToken;
@@ -455,7 +457,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       if (newCredentials?.accessToken || newCredentials?.copilotToken) {
         if (log?.line) log.line(reqTag, "🔑", `TOKEN REFRESHED · ${provider}/${model}`);
         Object.assign(credentials, newCredentials);
-        if (onCredentialsRefreshed) {
+        // Managed refresh committed under the shared lock already. A second
+        // callback after releasing it could overwrite a newer rotating pair.
+        if (onCredentialsRefreshed && !deploymentRuntime()) {
           try { await onCredentialsRefreshed(newCredentials); } catch (e) { log?.warn?.("TOKEN", `onCredentialsRefreshed failed: ${e.message}`); }
         }
         try {
