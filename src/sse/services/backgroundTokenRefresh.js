@@ -124,12 +124,18 @@ async function refreshTick(deps) {
       if (deploymentRuntime() && !deploymentRuntime().ownsBackground()) break;
       const conn = due[i];
       try {
-        await refresh(conn);
-        log.info("BG_TOKEN_REFRESH", "Connection refresh finished", {
-          id: conn.id,
-          email: conn.email || conn.name || conn.id,
-          provider: conn.provider,
-        });
+        const result = await refresh(conn);
+        if (result?.refreshRejected === true) {
+          log.warn("BG_TOKEN_REFRESH", "Account requires reauthorization", {
+            id: conn.id, provider: conn.provider, error: result.error, status: result.status,
+          });
+        } else {
+          log.info("BG_TOKEN_REFRESH", "Connection refresh finished", {
+            id: conn.id,
+            email: conn.email || conn.name || conn.id,
+            provider: conn.provider,
+          });
+        }
       } catch (err) {
         log.warn("BG_TOKEN_REFRESH", "Connection refresh failed (swallowed)", {
           id: conn?.id,

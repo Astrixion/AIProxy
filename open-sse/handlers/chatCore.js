@@ -63,6 +63,9 @@ export function stripContinuityFields(body) {
 
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
   const { provider, model } = modelInfo;
+  if (credentials?.refreshRejected === true) {
+    return createErrorResult(HTTP_STATUS.UNAUTHORIZED, `${provider} OAuth refresh rejected: ${credentials.error}; reauthorize this account`);
+  }
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
   const sessionSeed = (() => {

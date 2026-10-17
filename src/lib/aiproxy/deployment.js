@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { getAdapter } from "@/lib/db/driver.js";
 import { assertCompatibleSchema } from "@/lib/db/migrate.js";
 import { TABLES, SCHEMA_VERSION } from "@/lib/db/schema.js";
@@ -6,7 +6,7 @@ import { latestVersion } from "@/lib/db/migrations/index.js";
 import { getSettings, assertManagedSettings } from "@/lib/db/repos/settingsRepo.js";
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/db/repos/connectionsRepo.js";
 import { mergeRefreshedCredentials } from "open-sse/services/oauthCredentialManager.js";
-import { parseVertexAdcJson } from "open-sse/services/tokenRefresh.js";
+import { isUnrecoverableRefreshError, parseVertexAdcJson } from "open-sse/services/tokenRefresh.js";
 import { deploymentRuntime } from "open-sse/services/deployment.js";
 import { initTranslators } from "open-sse/translator/index.js";
 import { startBackgroundTokenRefresh } from "@/sse/services/backgroundTokenRefresh.js";
@@ -61,12 +61,22 @@ export async function prepareDeployment() {
       // Persist intent before consuming a possibly single-use token. A crash or
       // ambiguous upstream failure must not allow another process to reuse it.
       const hasRefreshToken = !!(current.refreshToken || parseVertexAdcJson(current.apiKey)?.refresh_token);
-      if (hasRefreshToken) db.run("INSERT INTO _meta(key, value) VALUES(?, ?)", [intent, new Date().toISOString()]);
+      const attempt = JSON.stringify({ id: randomUUID(), startedAt: new Date().toISOString() });
+      if (hasRefreshToken) db.run("INSERT INTO _meta(key, value) VALUES(?, ?)", [intent, attempt]);
       const refreshed = await refresh(current);
       if (!refreshed?.accessToken && !refreshed?.apiKey && !refreshed?.copilotToken) {
         // Static API keys have no refresh operation; their ordinary 401 must not
         // create an uncertain-rotation intent or fence deployment forever.
         if (!hasRefreshToken) return refreshed;
+        if (refreshed?.refreshRejected === true && isUnrecoverableRefreshError(refreshed)) {
+          // A structured provider rejection issued no replacement credentials.
+          // Resolve only this attempt; failed persistence still throws and fences.
+          db.transaction(() => {
+            const resolved = db.run("DELETE FROM _meta WHERE key = ? AND value = ?", [intent, attempt]);
+            if (resolved.changes !== 1) throw new Error("Rejected refresh intent could not be resolved");
+          });
+          return refreshed;
+        }
         throw new Error("OAuth refresh outcome is uncertain; operator reconciliation required");
       }
       const merged = mergeRefreshedCredentials(provider, current, refreshed);

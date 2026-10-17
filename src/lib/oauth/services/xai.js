@@ -167,8 +167,13 @@ export class XaiService extends OAuthService {
       }),
     });
     if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`xAI token refresh failed: ${err}`);
+      const body = await res.text();
+      const error = new Error(`xAI token refresh failed (HTTP ${res.status})`);
+      error.status = res.status;
+      // Only an actual non-success HTTP response can establish rejection.
+      // Malformed bodies remain ambiguous; never infer OAuth errors from text.
+      try { error.oauthResponse = JSON.parse(body); } catch { /* retain ambiguity */ }
+      throw error;
     }
     return await res.json();
   }

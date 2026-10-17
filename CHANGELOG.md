@@ -1,5 +1,8 @@
 # AIProxy extension (unreleased)
 
+- Keep confirmed Grok/xAI OAuth refresh rejection account-local instead of fencing
+  blue-green deployment. Resolve only the rejected attempt's persisted intent;
+  transport ambiguity, malformed responses and persistence failures remain fenced.
 - Add opt-in managed blue-green releases with native SQLite compatibility checks,
   cross-process credential refresh coordination and drain accounting through stream
   completion and final persistence. Standby never migrates; incomplete drains retain

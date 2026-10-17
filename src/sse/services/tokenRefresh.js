@@ -290,6 +290,12 @@ async function checkAndRefreshTokenUnlocked(provider, credentials, options) {
 
     const newCreds = await refreshDeploymentCredentials(provider, creds,
       (current) => _refreshProviderCredentials(provider, current, log));
+    if (newCreds?.refreshRejected === true) {
+      // Authentication rejection is a result, not a tracked persistence failure.
+      // Preserve credentials for callers while carrying the rejection to chat
+      // account fallback and the background scheduler without another refresh.
+      return { ...creds, ...newCreds };
+    }
     if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
       const mergedCreds = {
         ...newCreds,

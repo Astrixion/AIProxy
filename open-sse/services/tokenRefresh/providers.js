@@ -1,5 +1,6 @@
 import { PROVIDERS, PROVIDER_OAUTH } from "../../config/providers.js";
 import { OAUTH_ENDPOINTS, GITHUB_COPILOT, buildKimiHeaders } from "../../config/appConstants.js";
+import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { dedupRefresh } from "./dedup.js";
 import { buildExternalIdpRefreshParams } from "../../../src/lib/oauth/kiroExternalIdp.js";
@@ -14,6 +15,12 @@ export async function refreshXaiToken(refreshToken, log) {
         _xaiServiceSingleton = new mod.XaiService();
       }
       const tokens = await _xaiServiceSingleton.refreshAccessToken(refreshToken);
+      if (!tokens || typeof tokens.access_token !== "string" || !tokens.access_token.trim()
+          || tokens.error !== undefined
+          || (tokens.refresh_token !== undefined && (typeof tokens.refresh_token !== "string" || !tokens.refresh_token.trim()))) {
+        log?.warn?.("TOKEN_REFRESH", "xai refresh returned malformed credentials; outcome is uncertain");
+        return null;
+      }
       return {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token || refreshToken,
@@ -21,11 +28,15 @@ export async function refreshXaiToken(refreshToken, log) {
         idToken: tokens.id_token,
       };
     } catch (e) {
-      log?.warn?.("TOKEN_REFRESH", `xai refresh failed: ${e?.message || e}`);
-      const msg = String(e?.message || "");
-      if (msg.includes("invalid_grant") || msg.includes("invalid_request")) {
-        return { error: "invalid_grant" };
+      const body = e?.oauthResponse;
+      if ((e?.status === HTTP_STATUS.BAD_REQUEST || e?.status === HTTP_STATUS.UNAUTHORIZED)
+          && body && typeof body === "object" && !Array.isArray(body)
+          && (body.error === "invalid_grant" || body.error === "invalid_request")
+          && !["access_token", "refresh_token", "id_token"].some((key) => key in body)) {
+        log?.warn?.("TOKEN_REFRESH", `xai refresh rejected: HTTP ${e.status} ${body.error}`);
+        return { error: body.error, status: e.status, refreshRejected: true };
       }
+      log?.warn?.("TOKEN_REFRESH", `xai refresh failed: ${e?.message || e}`);
       return null;
     }
   }, log);

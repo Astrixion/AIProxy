@@ -6,6 +6,7 @@ import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders, NOUS_ATTRIBUTION } from "../config/appConstants.js";
 import { buildClineHeaders } from "../shared/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { refreshProviderCredentials } from "../services/oauthCredentialManager.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
 import { extractClaudeSessionIdFromUserId } from "../utils/claudeCloaking.js";
@@ -270,6 +271,7 @@ export class DefaultExecutor extends BaseExecutor {
     const refreshers = {
       claude: () => this.refreshFromGrant(credentials, proxyOptions),
       codex: () => this.refreshFromGrant(credentials, proxyOptions),
+      xai: () => refreshProviderCredentials(this.provider, credentials, log),
       iflow: () => this.refreshIflow(credentials.refreshToken, proxyOptions),
       gemini: () => this.refreshFromGrant(credentials, proxyOptions),
       kiro: () => this.refreshKiro(credentials.refreshToken, proxyOptions),
@@ -285,7 +287,7 @@ export class DefaultExecutor extends BaseExecutor {
 
     try {
       const result = await refresher();
-      if (result) log?.info?.("TOKEN", `${this.provider} refreshed`);
+      if (result && !result.refreshRejected) log?.info?.("TOKEN", `${this.provider} refreshed`);
       return result;
     } catch (error) {
       log?.error?.("TOKEN", `${this.provider} refresh error: ${error.message}`);
