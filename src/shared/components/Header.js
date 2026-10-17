@@ -171,9 +171,9 @@ const getPageInfo = (pathname) => {
     };
   if (pathname === "/dashboard")
     return {
-      title: "Endpoint",
-      description: "API endpoint configuration",
-      icon: "api",
+      title: "Dashboard",
+      description: "Scoped provider request outcomes and reported usage",
+      icon: "dashboard",
       breadcrumbs: [],
     };
   return { title: "", description: "", breadcrumbs: [] };

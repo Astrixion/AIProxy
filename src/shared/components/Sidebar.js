@@ -18,6 +18,7 @@ const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt", "syste
 const COMBINED_WEB_ITEM = { id: "web", label: "Web Fetch & Search", icon: "travel_explore", href: "/dashboard/media-providers/web" };
 
 const navItems = [
+  { href: "/dashboard", label: "Dashboard", icon: "dashboard" },
   { href: "/dashboard/endpoint", label: "Endpoint & Key", icon: "api" },
   { href: "/dashboard/providers", label: "Providers", icon: "dns" },
   { href: "/dashboard/provider-facade", label: "Scoped providers", icon: "key" },
@@ -71,10 +72,7 @@ export default function Sidebar({ onClose }) {
   }, []);
 
   const isActive = (href) => {
-    if (href === "/dashboard/endpoint") {
-      return pathname === "/dashboard" || pathname.startsWith("/dashboard/endpoint");
-    }
-    return pathname.startsWith(href);
+    return pathname === href || (href !== "/dashboard" && pathname.startsWith(`${href}/`));
   };
 
   // Open manual update panel (no countdown yet — user must click Copy to trigger shutdown)
@@ -165,6 +163,7 @@ export default function Sidebar({ onClose }) {
               key={item.href}
               href={item.href}
               onClick={onClose}
+              aria-current={isActive(item.href) ? "page" : undefined}
               className={cn(
                 "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
                 isActive(item.href)
@@ -173,6 +172,7 @@ export default function Sidebar({ onClose }) {
               )}
             >
               <span
+                aria-hidden="true"
                 className={cn(
                   "material-symbols-outlined text-[18px]",
                   isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"

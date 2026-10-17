@@ -6,9 +6,11 @@
   "description": "Unit tests for 9router embeddings endpoint",
   "scripts": {
     "test": "vitest run --reporter=verbose",
-    "test:watch": "vitest --reporter=verbose"
+    "test:watch": "vitest --reporter=verbose",
+    "test:ui": "node ui/provider-facade.mjs"
   },
   "devDependencies": {
+    "playwright": "^1.62.1",
     "vitest": "^4.0.0"
   },
   "engines": {
