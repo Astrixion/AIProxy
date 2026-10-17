@@ -6,6 +6,7 @@ import { latestVersion } from "@/lib/db/migrations/index.js";
 import { getSettings, assertManagedSettings } from "@/lib/db/repos/settingsRepo.js";
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/db/repos/connectionsRepo.js";
 import { mergeRefreshedCredentials } from "open-sse/services/oauthCredentialManager.js";
+import { parseVertexAdcJson } from "open-sse/services/tokenRefresh.js";
 import { deploymentRuntime } from "open-sse/services/deployment.js";
 import { initTranslators } from "open-sse/translator/index.js";
 import { startBackgroundTokenRefresh } from "@/sse/services/backgroundTokenRefresh.js";
@@ -59,9 +60,13 @@ export async function prepareDeployment() {
       };
       // Persist intent before consuming a possibly single-use token. A crash or
       // ambiguous upstream failure must not allow another process to reuse it.
-      db.run("INSERT INTO _meta(key, value) VALUES(?, ?)", [intent, new Date().toISOString()]);
+      const hasRefreshToken = !!(current.refreshToken || parseVertexAdcJson(current.apiKey)?.refresh_token);
+      if (hasRefreshToken) db.run("INSERT INTO _meta(key, value) VALUES(?, ?)", [intent, new Date().toISOString()]);
       const refreshed = await refresh(current);
       if (!refreshed?.accessToken && !refreshed?.apiKey && !refreshed?.copilotToken) {
+        // Static API keys have no refresh operation; their ordinary 401 must not
+        // create an uncertain-rotation intent or fence deployment forever.
+        if (!hasRefreshToken) return refreshed;
         throw new Error("OAuth refresh outcome is uncertain; operator reconciliation required");
       }
       const merged = mergeRefreshedCredentials(provider, current, refreshed);
