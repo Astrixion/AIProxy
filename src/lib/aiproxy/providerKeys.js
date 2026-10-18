@@ -67,6 +67,9 @@ export function contextWindowForMembers(members) {
     const slash = member.model.indexOf("/");
     const provider = slash === -1 ? null : member.model.slice(0, slash);
     const model = slash === -1 ? member.model : member.model.slice(slash + 1);
+    if (resolveProviderId(provider) === "claude" && /^claude-sonnet-4[.-]6(?:$|-)/i.test(model)) {
+      return 200000;
+    }
     if (/^(gpt-5\.[56]|claude-(sonnet|opus)-4[.-]6|claude-opus-5[.-]5|k3$|kimi-k3$|deepseek-v4)/i.test(model)) {
       return 1000000;
     }

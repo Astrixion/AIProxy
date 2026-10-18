@@ -429,6 +429,31 @@ describe("AIProxy provider-key routing", () => {
     { model: "claude/b", connectionId: "account-b" },
   ];
 
+  it.each([
+    [["claude/claude-sonnet-4-6"], 200000],
+    [["cc/claude-sonnet-4.6"], 200000],
+    [["cc/CLAUDE-SONNET-4-6-20260217"], 200000],
+    [["anthropic/claude-sonnet-4-6"], 1000000],
+    [["anthropic-compatible-test/claude-sonnet-4-6"], 1000000],
+    [["openai-compatible-test/claude-sonnet-4.6"], 1000000],
+    [["claude-sonnet-4-6"], 1000000],
+    [["claude/claude-sonnet-4.60"], 1000000],
+    [["claude/claude-opus-4-6"], 1000000],
+    [["cc/claude-opus-5.5"], 1000000],
+    [["kimi/k3"], 1000000],
+    [["kimi/k3", "claude/claude-sonnet-4-6"], 200000],
+    [["cc/claude-sonnet-4.6", "unknown/unknown-model"], 128000],
+  ])("advertises the conservative context minimum for %j as %i", async (models, contextWindow) => {
+    const { getProviderKeyDescriptor } = await import("@/lib/aiproxy/providerKeys.js");
+    await db.upsertProviderKeyState("context-key", "round-robin",
+      models.map((model, index) => ({ model, connectionId: `context-account-${index}` })));
+    try {
+      expect(await getProviderKeyDescriptor("context-key")).toMatchObject({ contextWindow });
+    } finally {
+      await db.deleteProviderKeyState("context-key");
+    }
+  });
+
   it("persists round-robin position", async () => {
     await db.upsertProviderKeyState("round-robin-key", "round-robin", members);
     const first = await db.selectProviderKeyMembers("round-robin-key", members);
