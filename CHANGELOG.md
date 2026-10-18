@@ -1,5 +1,8 @@
 # AIProxy extension (unreleased)
 
+- Advertise the operator-selected 1M agent context budget for every scoped provider
+  key, without changing upstream entitlement or output limits. Correct the native
+  DeepSeek Flash alias to its documented 1M context and 384K output capability.
 - Keep confirmed Grok/xAI OAuth refresh rejection account-local instead of fencing
   blue-green deployment. Resolve only the rejected attempt's persisted intent;
   transport ambiguity, malformed responses and persistence failures remain fenced.

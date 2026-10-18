@@ -149,14 +149,13 @@ export const MODEL_CAPABILITIES = {
   // opencode-go/deepseek-v4.1-flash with modalities.input ["text","image"] — and upstream
   // the retired v4-flash / vision-exp ids route to it, so the live V4.1 ids carry the
   // same image capability as the exp id above. "deepseek-flash" is the GA id on the
-  // DeepSeek API; it previously fell through to the generic *deepseek* pattern, whose
-  // 128K/64K limits are kept here. The repeated fields are deliberate: an exact entry
-  // short-circuits the pattern table, so a vision-only delta would drop them.
+  // DeepSeek API and has the same 1M context / 384K output limits, not the legacy
+  // generic *deepseek* pattern's 128K/64K limits.
   // Some providers (e.g. Kenari) expose this model under the hyphenated ID
   // "deepseek-v4-1-flash" (dash instead of dot); add it as an alias (#4293).
   "deepseek-v4.1-flash": { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 1000000, maxOutput: 384000 },
   "deepseek-v4-1-flash": { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 1000000, maxOutput: 384000 },
-  "deepseek-flash":      { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 128000, maxOutput: 64000 },
+  "deepseek-flash":      { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 1000000, maxOutput: 384000 },
 
   // Qwen plain coder/text (no vision) — registry "vision-model" / "coder-model" aliases
   "vision-model":      { vision: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000 },
