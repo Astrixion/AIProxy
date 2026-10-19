@@ -1,5 +1,8 @@
 # AIProxy extension (unreleased)
 
+- Configure Claude virtual-key context budgets at 200K, including Claude through
+  raw/third-party routes and mixed pools; retain 1M for non-Claude-only keys.
+  Retained sessions require an explicitly approved captured-config update.
 - Keep confirmed Anthropic long-context credit rejections request-local: return an
   explicit non-retryable 400 retaining the upstream 429, without cooling down the
   shared account/model or blocking unrelated sessions. Other 429s retain backoff.

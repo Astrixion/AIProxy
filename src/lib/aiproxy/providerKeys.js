@@ -61,10 +61,16 @@ export async function listProviderKeys() {
   };
 }
 
-export function contextWindowForMembers() {
-  // Operator-selected agent context budget for every virtual key, including all.
-  // This does not change upstream limits, subscription entitlement or billing.
-  return 1000000;
+export function contextWindowForMembers(members) {
+  // Configured agent budgets, not upstream entitlement or billing guarantees.
+  // Claude through other providers uses the same budget; mixed pools use the minimum.
+  const hasClaude = members.some((member) => {
+    const slash = member.model.indexOf("/");
+    const provider = slash === -1 ? null : member.model.slice(0, slash);
+    const model = slash === -1 ? member.model : member.model.slice(slash + 1);
+    return resolveProviderId(provider) === "claude" || /(^|[/.])claude(?:[-.]|$)/i.test(model);
+  });
+  return hasClaude ? 200000 : 1000000;
 }
 
 export function maxTokensForMembers(members) {
