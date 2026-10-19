@@ -1,5 +1,8 @@
 # AIProxy extension (unreleased)
 
+- Keep confirmed Anthropic long-context credit rejections request-local: return an
+  explicit non-retryable 400 retaining the upstream 429, without cooling down the
+  shared account/model or blocking unrelated sessions. Other 429s retain backoff.
 - Advertise the operator-selected 1M agent context budget for every scoped provider
   key, without changing upstream entitlement or output limits. Correct the native
   DeepSeek Flash alias to its documented 1M context and 384K output capability.

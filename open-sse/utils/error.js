@@ -1,4 +1,4 @@
-import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
+import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES, ANTHROPIC_LONG_CONTEXT_REJECTION } from "../config/errorConfig.js";
 
 /**
  * Build OpenAI-compatible error response body
@@ -54,7 +54,7 @@ export async function writeStreamError(writer, statusCode, message) {
  * Parse upstream provider error response
  * @param {Response} response - Fetch response from provider
  * @param {object} [executor] - Optional executor with parseError() override for provider-specific parsing
- * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number}>}
+ * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number, requestScoped?: boolean}>}
  */
 export async function parseUpstreamError(response, executor = null) {
   let bodyText = "";
@@ -62,6 +62,20 @@ export async function parseUpstreamError(response, executor = null) {
     bodyText = await response.text();
   } catch {
     bodyText = "";
+  }
+
+  const rejection = ANTHROPIC_LONG_CONTEXT_REJECTION;
+  if (response.status === rejection.status && rejection.providers.includes(executor?.provider)) {
+    try {
+      const body = JSON.parse(bodyText);
+      if (body?.type === rejection.type
+        && body.error?.type === rejection.errorType
+        && body.error?.message === rejection.message) {
+        // Preserve the actual upstream status/body for diagnostics. Only the
+        // caller-facing response is remapped; no shared account state is changed.
+        return { statusCode: response.status, message: bodyText, requestScoped: true };
+      }
+    } catch { /* Unknown/malformed responses retain normal provider handling. */ }
   }
 
   // Let executor-specific parser extract provider-specific fields (e.g. codex resetsAtMs)

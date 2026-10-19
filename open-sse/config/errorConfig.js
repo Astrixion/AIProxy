@@ -28,6 +28,16 @@ export const DEFAULT_ERROR_MESSAGES = {
   504: "Gateway timeout"
 };
 
+// This 429 describes the requested context's entitlement, not account-wide quota.
+// Match the complete provider envelope; unknown 429s must keep normal backoff.
+export const ANTHROPIC_LONG_CONTEXT_REJECTION = {
+  providers: ["claude", "anthropic"],
+  status: 429,
+  type: "error",
+  errorType: "rate_limit_error",
+  message: "Usage credits are required for long context requests.",
+};
+
 // Exponential backoff config for rate limits
 export const BACKOFF_CONFIG = {
   base: 2000,

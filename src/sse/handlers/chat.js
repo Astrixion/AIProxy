@@ -435,7 +435,9 @@ async function handleSingleModelChat(
       }
     });
 
-    if (result.success) return result.response;
+    // A rejected request is not evidence that this account/model is unavailable
+    // to other sessions. Do not consult shared cooldown/fallback rules for it.
+    if (result.success || result.requestScoped) return result.response;
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;

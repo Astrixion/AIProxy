@@ -229,7 +229,11 @@ export async function normalizeFacadeResponse(response, virtualModelName, wantsS
       : response.status === 429 || response.status === 503
         ? "overloaded_error"
         : response.status >= 500 ? "api_error" : "invalid_request_error";
-    return anthropicError(response.status, errorType, String(message));
+    const failure = anthropicError(response.status, errorType, String(message));
+    if (response.headers.get("x-should-retry") === "false") {
+      failure.headers.set("x-should-retry", "false");
+    }
+    return failure;
   }
 
   if (wantsStream) {
