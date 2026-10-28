@@ -48,6 +48,7 @@ export default {
       "https://www.googleapis.com/auth/userinfo.email",
       "https://www.googleapis.com/auth/userinfo.profile",
     ],
+    reusableRefreshToken: true,
     refresh: {
       encoding: "form",
     },

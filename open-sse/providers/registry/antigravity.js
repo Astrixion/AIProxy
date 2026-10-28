@@ -89,6 +89,7 @@ export default {
     loadCodeAssistEndpoint: "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
     onboardUserEndpoint: "https://cloudcode-pa.googleapis.com/v1internal:onboardUser",
     loadCodeAssistUserAgent: ANTIGRAVITY_IDE_USER_AGENT,
+    reusableRefreshToken: true,
     refreshLeadMs: 300000,
   },
   searchViaChat: {

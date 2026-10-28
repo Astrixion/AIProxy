@@ -1,5 +1,11 @@
 # AIProxy extension (unreleased)
 
+- Settle Next 16.4.2 static/output transport waits on disconnect without skipping
+  admitted handlers, credential locks or final persistence. Report outstanding
+  request paths in private deployment status instead of retaining only a counter.
+- Keep transient Google Antigravity/Gemini CLI refresh failures retryable with
+  their reusable saved refresh token; rotating/unknown providers and persistence
+  failures retain the durable deployment fence.
 - Configure Claude virtual-key context budgets at 200K, including Claude through
   raw/third-party routes and mixed pools; retain 1M for non-Claude-only keys.
   Retained sessions require an explicitly approved captured-config update.

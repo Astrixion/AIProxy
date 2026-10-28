@@ -6,6 +6,7 @@ import { latestVersion } from "@/lib/db/migrations/index.js";
 import { getSettings, assertManagedSettings } from "@/lib/db/repos/settingsRepo.js";
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/db/repos/connectionsRepo.js";
 import { mergeRefreshedCredentials } from "open-sse/services/oauthCredentialManager.js";
+import { PROVIDER_OAUTH } from "open-sse/config/providers.js";
 import { isUnrecoverableRefreshError, parseVertexAdcJson } from "open-sse/services/tokenRefresh.js";
 import { deploymentRuntime } from "open-sse/services/deployment.js";
 import { initTranslators } from "open-sse/translator/index.js";
@@ -61,13 +62,17 @@ export async function prepareDeployment() {
       // Persist intent before consuming a possibly single-use token. A crash or
       // ambiguous upstream failure must not allow another process to reuse it.
       const hasRefreshToken = !!(current.refreshToken || parseVertexAdcJson(current.apiKey)?.refresh_token);
+      // Google refresh grants reuse the saved token. A network failure cannot
+      // lose a rotated pair, so ordinary provider retry remains safe. Unknown
+      // providers retain the stricter durable uncertainty fence.
+      const requiresIntent = hasRefreshToken && PROVIDER_OAUTH[provider]?.reusableRefreshToken !== true;
       const attempt = JSON.stringify({ id: randomUUID(), startedAt: new Date().toISOString() });
-      if (hasRefreshToken) db.run("INSERT INTO _meta(key, value) VALUES(?, ?)", [intent, attempt]);
+      if (requiresIntent) db.run("INSERT INTO _meta(key, value) VALUES(?, ?)", [intent, attempt]);
       const refreshed = await refresh(current);
       if (!refreshed?.accessToken && !refreshed?.apiKey && !refreshed?.copilotToken) {
-        // Static API keys have no refresh operation; their ordinary 401 must not
-        // create an uncertain-rotation intent or fence deployment forever.
-        if (!hasRefreshToken) return refreshed;
+        // Static keys and reusable refresh grants did not consume a single-use
+        // credential; neither should fence deployment on an ordinary failure.
+        if (!requiresIntent) return refreshed;
         if (refreshed?.refreshRejected === true && isUnrecoverableRefreshError(refreshed)) {
           // A structured provider rejection issued no replacement credentials.
           // Resolve only this attempt; failed persistence still throws and fences.

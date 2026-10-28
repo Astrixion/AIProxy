@@ -8,7 +8,7 @@ const path = require("node:path");
 module.exports = function createDeploymentRuntime() {
   const locks = new AsyncLocalStorage();
   const pending = new Map();
-  let requests = 0;
+  const requests = new Map();
   let phase = "standby";
   let failure = null;
   let ready = null;
@@ -92,8 +92,9 @@ module.exports = function createDeploymentRuntime() {
         slot: process.env.AIPROXY_SLOT,
         release: process.env.AIPROXY_RELEASE,
         phase, ready: !!ready && !failure, compatibility: ready,
-        requests, pending: [...pending.values()], failure,
-        drained: phase === "draining" && requests === 0 && pending.size === 0 && !failure,
+        requests: requests.size, activeRequests: [...requests.values()],
+        pending: [...pending.values()], failure,
+        drained: phase === "draining" && requests.size === 0 && pending.size === 0 && !failure,
       };
     },
     promote() {
@@ -112,7 +113,7 @@ module.exports = function createDeploymentRuntime() {
         res.end(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "Release is not admitting requests" } }));
         return;
       }
-      requests++;
+      requests.set(req, { method: req.method, pathname, startedAt: new Date().toISOString() });
       const completed = new Promise((resolve) => {
         res.once("finish", resolve);
         res.once("close", resolve);
@@ -139,7 +140,7 @@ module.exports = function createDeploymentRuntime() {
         if (!res.headersSent) res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Request coordination unavailable; operator inspection required" }));
       } finally {
-        requests--;
+        requests.delete(req);
       }
     },
   };
