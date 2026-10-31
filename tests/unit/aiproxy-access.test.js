@@ -354,7 +354,7 @@ describe("AIProxy dashboard management", () => {
       const response = await internal.GET(request(null, "", { authorization: "Bearer synthetic-control-token" }));
       const catalog = await response.json();
       expect(catalog.keys.find(key => key.name === "all")).toMatchObject({
-        strategy: "round-robin", contextWindow: 128000, maxTokens: 32768,
+        strategy: "round-robin", contextWindow: 200000, maxTokens: 32768,
         members: [
           { model: "claude/test", connectionId: "account-a" },
           { model: "claude/vision", connectionId: "account-b" },
@@ -433,16 +433,24 @@ describe("AIProxy provider-key routing", () => {
     [["claude/claude-sonnet-4-6"], 200000],
     [["cc/claude-sonnet-4.6"], 200000],
     [["cc/CLAUDE-SONNET-4-6-20260217"], 200000],
-    [["anthropic/claude-sonnet-4-6"], 1000000],
-    [["anthropic-compatible-test/claude-sonnet-4-6"], 1000000],
-    [["openai-compatible-test/claude-sonnet-4.6"], 1000000],
-    [["claude-sonnet-4-6"], 1000000],
-    [["claude/claude-sonnet-4.60"], 1000000],
-    [["claude/claude-opus-4-6"], 1000000],
-    [["cc/claude-opus-5.5"], 1000000],
-    [["kimi/k3"], 1000000],
+    [["anthropic/claude-sonnet-4-6"], 200000],
+    [["anthropic-compatible-test/claude-sonnet-4-6"], 200000],
+    [["openai-compatible-test/claude-sonnet-4.6"], 200000],
+    [["claude-sonnet-4-6"], 200000],
+    [["claude/claude-sonnet-4.60"], 200000],
+    [["claude/claude-opus-4-6"], 200000],
+    [["cc/claude-opus-5.5"], 200000],
+    [["kimi/k3"], 1048576],
     [["kimi/k3", "claude/claude-sonnet-4-6"], 200000],
-    [["cc/claude-sonnet-4.6", "unknown/unknown-model"], 128000],
+    [["codex/gpt-5.6-sol-high"], 372000],
+    [["cx/gpt-5.6-sol(high)"], 372000],
+    [["codex/gpt-5.6-sol[1m](high)"], 872000],
+    [["codex/gpt-5.6-terra"], 272000],
+    [["openai/gpt-5.6-sol"], 1050000],
+    [["kimi/k3", "codex/gpt-5.6-sol-high"], 372000],
+    [["codex/gpt-5.6-sol-high", "openai/gpt-4o"], 128000],
+    [["openai/gpt-4o", "codex/gpt-5.6-sol-high"], 128000],
+    [["kimi/k3", "unknown/unknown-model"], 200000],
   ])("advertises the conservative context minimum for %j as %i", async (models, contextWindow) => {
     const { getProviderKeyDescriptor } = await import("@/lib/aiproxy/providerKeys.js");
     await db.upsertProviderKeyState("context-key", "round-robin",

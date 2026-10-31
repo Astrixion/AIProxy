@@ -1,5 +1,9 @@
 # AIProxy extension (unreleased)
 
+- Derive scoped provider-key context windows from each provider/model's capability
+  catalog, using the smallest window across pool members and recognizing Codex
+  effort suffixes. Preserve the operator's 200K Claude ceiling and output limits.
+  Existing captured session configurations are not rewritten automatically.
 - Settle Next 16.4.2 static/output transport waits on disconnect without skipping
   admitted handlers, credential locks or final persistence. Report outstanding
   request paths in private deployment status instead of retaining only a counter.

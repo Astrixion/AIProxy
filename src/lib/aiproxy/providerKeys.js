@@ -10,7 +10,7 @@ import {
 } from "@/lib/localDb";
 import { resolveProviderId } from "@/shared/constants/providers.js";
 import { getModelInfo } from "@/sse/services/model.js";
-import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { DEFAULT_CAPABILITIES, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { RESERVED_ALL_KEY } from "./accessControl.js";
 
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+(?:\/[a-zA-Z0-9_.\-]+)*$/;
@@ -62,15 +62,20 @@ export async function listProviderKeys() {
 }
 
 export function contextWindowForMembers(members) {
-  // Configured agent budgets, not upstream entitlement or billing guarantees.
-  // Claude through other providers uses the same budget; mixed pools use the minimum.
-  const hasClaude = members.some((member) => {
+  if (!members.length) return DEFAULT_CAPABILITIES.contextWindow;
+  // Every selectable route must fit. Keep the operator's Claude entitlement ceiling;
+  // other models use the provider-specific catalog rather than a blanket 1M budget.
+  return Math.min(...members.map((member) => {
     const slash = member.model.indexOf("/");
-    const provider = slash === -1 ? null : member.model.slice(0, slash);
-    const model = slash === -1 ? member.model : member.model.slice(slash + 1);
-    return resolveProviderId(provider) === "claude" || /(^|[/.])claude(?:[-.]|$)/i.test(model);
-  });
-  return hasClaude ? 200000 : 1000000;
+    const provider = resolveProviderId(slash === -1 ? null : member.model.slice(0, slash));
+    let model = (slash === -1 ? member.model : member.model.slice(slash + 1))
+      .replace(/\([^()]+\)\s*$/, "").trim();
+    // Codex also accepts legacy dash-suffixed effort levels on the same model.
+    if (provider === "codex") model = model.replace(/-(none|minimal|low|medium|high|xhigh)$/, "");
+    const contextWindow = getCapabilitiesForModel(provider, model).contextWindow;
+    const isClaude = provider === "claude" || /(^|[/.])claude(?:[-.]|$)/i.test(model);
+    return isClaude ? Math.min(contextWindow, 200000) : contextWindow;
+  }));
 }
 
 export function maxTokensForMembers(members) {
